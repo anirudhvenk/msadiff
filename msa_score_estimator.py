@@ -46,7 +46,7 @@ TransformerBlock = MSATransformerBlock
 class TransformerEncoder(torch.nn.Module):
     def __init__(self, args):
         super().__init__()
-        self.num_hidden_layers = 12
+        self.num_hidden_layers = 4
         self.hidden_size = args["embed_dim"]
         self.input_blocks = torch.nn.ModuleList(
             [TransformerBlock(args) for _ in range(0, self.num_hidden_layers // 2)]
@@ -90,7 +90,8 @@ class TransformerEncoder(torch.nn.Module):
             )
 
         return x
-    
+
+
 def timestep_embedding(timesteps, dim, max_period=10000):
     """
     Create sinusoidal timestep embeddings.
@@ -110,9 +111,10 @@ def timestep_embedding(timesteps, dim, max_period=10000):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
 
-class ScoreEstimatorEMB(nn.Module):
+
+class MSAScoreEstimatorEMB(nn.Module):
     def __init__(self, args):
-        super(ScoreEstimatorEMB, self).__init__()
+        super(MSAScoreEstimatorEMB, self).__init__()
 
         hidden_layer_dim = args["embed_dim"]
         self._hidden_layer_dim = hidden_layer_dim
@@ -169,28 +171,3 @@ class ScoreEstimatorEMB(nn.Module):
         )
 
         return output
-
-
-args = {
-    "seq_embed_dim": 320,
-    "embed_dim": 768,
-    "ffn_embed_dim": 3072,
-    "attention_heads": 12,
-    "dropout": 0.1,
-    "attention_dropout": 0.1,
-    "activation_dropout": 0.1,
-    "num_rows": 128,
-    "max_tokens": 2 ** 14,
-    "max_position_embeddings": 512
-}
-
-msa_transformer_block = MSATransformerBlock(args).to(device="cpu")
-dataset = MSADataset("./data")
-dataloader = DataLoader(dataset, 1, False)
-
-msa = next(iter(dataloader)).to(device="cpu")
-seq = torch.rand((1,314,320)).to(device="cpu")
-
-score_estimator = ScoreEstimatorEMB(args).to(device="cpu")
-out = score_estimator(x_t=msa, query=seq, time_t=torch.tensor([5]).to(device="cpu"), x_0_self_cond=msa)
-print(out.shape)

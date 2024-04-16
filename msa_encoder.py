@@ -66,21 +66,8 @@ class MSAEncoder():
             embeddings = self.encoder(tokens.cuda(), repr_layers=[12])["representations"][12]
         
         return embeddings
-
-# data_dir = "./data"
-# encoder = MSAEncoder()
-# all_inputs = []
-# self.msa_list = []
-
-# add normalization later
-# for msa_file in tqdm(os.listdir(data_dir)):
-#     msa = read_msa(os.path.join(data_dir, msa_file))
-#     inputs = greedy_select(msa, num_seqs=128)
-#     all_inputs.append(inputs)
-    
-# print(encoder.batch_encode(all_inputs).shape)
-
   
+
 class MSADataset(Dataset):
     def __init__(self, data_dir):
         encoder = MSAEncoder()
@@ -98,7 +85,3 @@ class MSADataset(Dataset):
     
     def __getitem__(self, idx):
         return self.msa_list[idx]
-    
-# msa_datset = MSADataset("./data")
-# train_dataloader = DataLoader(msa_datset, batch_size=1, shuffle=True)
-# print(next(iter(train_dataloader)))
