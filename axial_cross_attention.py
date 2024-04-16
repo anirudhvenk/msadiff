@@ -7,6 +7,11 @@ import math
 import torch
 import torch.nn as nn
 
+from typing import Optional
+from msa_encoder import MSADataset
+from torch.utils.data import Dataset, DataLoader
+from esm.modules import FeedForwardNetwork, NormalizedResidualBlock, ESM1bLayerNorm
+
 class RowCrossAttention(nn.Module):
     """Compute self-attention over rows of a 2D input."""
 
@@ -24,7 +29,6 @@ class RowCrossAttention(nn.Module):
         self.head_dim = embed_dim // num_heads
         self.scaling = self.head_dim ** -0.5
         self.max_tokens_per_msa = max_tokens_per_msa
-        self.attn_shape = "hnj"
 
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
@@ -79,9 +83,9 @@ class RowCrossAttention(nn.Module):
         self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
+        query_cols, batch_size, query_embed_dim = query.size()
         num_rows, num_cols, batch_size, embed_dim = key.size()
-        
-        q = self.q_proj(query).view(batch_size, self.num_heads, self.head_dim)
+        q = self.q_proj(query).view(query_cols, batch_size, self.num_heads, self.head_dim)
         k = self.k_proj(key).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
         q *= scaling
         if self_attn_padding_mask is not None:
@@ -89,7 +93,7 @@ class RowCrossAttention(nn.Module):
             # we take a sum across the alignment axis.
             q *= 1 - self_attn_padding_mask.permute(0, 2, 1).unsqueeze(2).unsqueeze(3).to(q)
 
-        attn_weights = torch.einsum(f"nhd,rjnhd->{self.attn_shape}", q, k)
+        attn_weights = torch.einsum("qnhd,rcnhd->hnqr", q, k)
 
         if self_attn_mask is not None:
             raise NotImplementedError
@@ -110,32 +114,32 @@ class RowCrossAttention(nn.Module):
     ):
         num_rows, num_cols, batch_size, embed_dim = value.size()
         v = self.v_proj(value).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
-        context = torch.einsum(f"{self.attn_shape},rjnhd->rjnhd", attn_probs, v)
+        context = torch.einsum("hnqr,rcnhd->rcnhd", attn_probs, v)
         context = context.contiguous().view(num_rows, num_cols, batch_size, embed_dim)
         output = self.out_proj(context)
         return output
 
     def forward(
         self,
+        x,
         query,
-        key,
-        value,
         self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
-        num_rows, num_cols, batch_size, embed_dim = key.size()
+        num_rows, num_cols, batch_size, embed_dim = x.size()
         if (num_rows * num_cols > self.max_tokens_per_msa) and not torch.is_grad_enabled():
-            return self._batched_forward(query, key, value, self_attn_mask, self_attn_padding_mask)
+            return self._batched_forward(query, x, x, self_attn_mask, self_attn_padding_mask)
         else:
             scaling = self.align_scaling(query)
             attn_weights = self.compute_attention_weights(
-                query, key, scaling, self_attn_mask, self_attn_padding_mask
+                query, x, scaling, self_attn_mask, self_attn_padding_mask
             )
             attn_probs = attn_weights.softmax(-1)
             attn_probs = self.dropout_module(attn_probs)
-            output = self.compute_attention_update(value, attn_probs)
+            output = self.compute_attention_update(x, attn_probs)
             return output, attn_probs
-        
+   
+  
 class ColumnCrossAttention(nn.Module):
     """Compute self-attention over columns of a 2D input."""
 
@@ -212,12 +216,13 @@ class ColumnCrossAttention(nn.Module):
             )
             output = self.out_proj(self.v_proj(key))
         else:
-            q = self.q_proj(query).view(batch_size, self.num_heads, self.head_dim)
+            query_cols, batch_size, query_embed_dim = query.size()
+            q = self.q_proj(query).view(query_cols, batch_size, self.num_heads, self.head_dim)
             k = self.k_proj(key).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
             v = self.v_proj(value).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
             q *= self.scaling
 
-            attn_weights = torch.einsum("nhd,jcnhd->hnj", q, k)
+            attn_weights = torch.einsum("qnhd,rcnhd->hcnq", q, k)
 
             if self_attn_mask is not None:
                 raise NotImplementedError
@@ -229,28 +234,112 @@ class ColumnCrossAttention(nn.Module):
 
             attn_probs = attn_weights.softmax(-1)
             attn_probs = self.dropout_module(attn_probs)
-            context = torch.einsum("hnj,jcnhd->jcnhd", attn_probs, v)
+            context = torch.einsum("hcnq,rcnhd->rcnhd", attn_probs, v)
             context = context.contiguous().view(num_rows, num_cols, batch_size, embed_dim)
             output = self.out_proj(context)
         return output, attn_probs
 
     def forward(
         self,
+        x,
         query,
-        key,
-        value,
         self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
-        num_rows, num_cols, batch_size, embed_dim = key.size()
+        num_rows, num_cols, batch_size, embed_dim = x.size()
         # if False and num_rows * num_cols > 2 ** 14 and not torch.is_grad_enabled():
         if (num_rows * num_cols) > self.max_tokens_per_msa and not torch.is_grad_enabled():
             return self._batched_forward(
                 query,
-                key,
-                value,
+                x,
+                x,
                 self_attn_mask,
                 self_attn_padding_mask,
             )
         else:
-            return self.compute_attention_update(query, key, value, self_attn_mask, self_attn_padding_mask)
+            return self.compute_attention_update(query, x, x, self_attn_mask, self_attn_padding_mask)
+
+
+class AxialTransformerLayer(nn.Module):
+    """Implements an Axial MSA Transformer block."""
+
+    def __init__(
+        self,
+        query_dim: int = 320,
+        embedding_dim: int = 768,
+        ffn_embedding_dim: int = 3072,
+        num_attention_heads: int = 12,
+        dropout: float = 0.1,
+        attention_dropout: float = 0.1,
+        activation_dropout: float = 0.1,
+        max_tokens_per_msa: int = 2**14,
+    ) -> None:
+        super().__init__()
+
+        # Initialize parameters
+        self.embedding_dim = embedding_dim
+        self.dropout_prob = dropout
+
+        row_cross_attention = RowCrossAttention(
+            query_dim,
+            embedding_dim,
+            num_attention_heads,
+            dropout=dropout,
+            max_tokens_per_msa=max_tokens_per_msa,
+        )
+
+        column_cross_attention = ColumnCrossAttention(
+            query_dim,
+            embedding_dim,
+            num_attention_heads,
+            dropout=dropout,
+            max_tokens_per_msa=max_tokens_per_msa,
+        )
+
+        feed_forward_layer = FeedForwardNetwork(
+            embedding_dim,
+            ffn_embedding_dim,
+            activation_dropout=activation_dropout,
+            max_tokens_per_msa=max_tokens_per_msa,
+        )
+
+        self.row_cross_attention = self.build_residual(row_cross_attention)
+        self.column_cross_attention = self.build_residual(column_cross_attention)
+        self.feed_forward_layer = self.build_residual(feed_forward_layer)
+
+    def build_residual(self, layer: nn.Module, cross=False):        
+        return NormalizedResidualBlock(
+            layer,
+            self.embedding_dim,
+            self.dropout_prob,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        query: torch.Tensor,
+        self_attn_mask: Optional[torch.Tensor] = None,
+        self_attn_padding_mask: Optional[torch.Tensor] = None,
+        need_head_weights: bool = False,
+    ):
+        """
+        LayerNorm is applied either before or after the self-attention/ffn
+        modules similar to the original Transformer implementation.
+        """
+        x, row_attn = self.row_cross_attention(
+            x=x,
+            query=query,
+            self_attn_mask=self_attn_mask,
+            self_attn_padding_mask=self_attn_padding_mask,
+        )
+        x, column_attn = self.column_cross_attention(
+            x=x,
+            query=query,
+            self_attn_mask=self_attn_mask,
+            self_attn_padding_mask=self_attn_padding_mask,
+        )
+        x = self.feed_forward_layer(x)
+        if need_head_weights:
+            return x, column_attn, row_attn
+        else:
+            return x

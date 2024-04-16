@@ -63,7 +63,7 @@ class MSAEncoder():
         _, _, tokens = self.batch_converter(sequences)
         
         with torch.no_grad():
-            embeddings = self.encoder(tokens.cuda())["logits"]
+            embeddings = self.encoder(tokens.cuda(), repr_layers=[12])["representations"][12]
         
         return embeddings
 
