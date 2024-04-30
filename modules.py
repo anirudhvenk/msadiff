@@ -8,9 +8,7 @@ import torch
 import torch.nn as nn
 
 from typing import Optional
-from msa_encoder import MSADataset
-from torch.utils.data import Dataset, DataLoader
-from esm.modules import FeedForwardNetwork, NormalizedResidualBlock, ESM1bLayerNorm
+from esm.modules import FeedForwardNetwork, NormalizedResidualBlock
 
 class RowCrossAttention(nn.Module):
     """Compute self-attention over rows of a 2D input."""

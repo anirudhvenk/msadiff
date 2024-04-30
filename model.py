@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import math
 from typing import Optional
-from axial_cross_attention import AxialTransformerLayer
+from modules import AxialTransformerLayer
 from esm.modules import ESM1bLayerNorm
-from msa_encoder import MSADataset
+from preprocess import MSADataset
 from torch.utils.data import Dataset, DataLoader
 
 class MSATransformerBlock(nn.Module):
@@ -38,7 +38,7 @@ class MSATransformerBlock(nn.Module):
         msa = self.axial_transformer_layer(x=msa, query=seq)
         msa = self.emb_layer_norm_after(msa)
         msa = msa.permute(2, 0, 1, 3)
-        
+             
         return msa
 
 TransformerBlock = MSATransformerBlock 

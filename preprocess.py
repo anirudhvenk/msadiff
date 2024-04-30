@@ -3,6 +3,7 @@ import esm
 import os
 import numpy as np
 import string
+import pickle
 
 from torch.utils.data import Dataset, DataLoader
 from Bio import SeqIO
@@ -52,36 +53,19 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
     indices = sorted(indices)
     return [msa[idx] for idx in indices]
 
-class MSAEncoder():
-    def __init__(self):
-        self.encoder, self.alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
-        self.encoder.cuda()
-        self.encoder.eval()
-        self.batch_converter = self.alphabet.get_batch_converter()
-        
-    def batch_encode(self, sequences):
-        _, _, tokens = self.batch_converter(sequences)
-        
-        with torch.no_grad():
-            embeddings = self.encoder(tokens.cuda(), repr_layers=[12])["representations"][12]
-        
-        return embeddings
-  
-
 class MSADataset(Dataset):
-    def __init__(self, data_dir):
-        encoder = MSAEncoder()
-        self.msa_list = []
-
-        # add normalization later
-        for msa_file in tqdm(os.listdir(data_dir)):
-            msa = read_msa(os.path.join(data_dir, msa_file))
-            inputs = greedy_select(msa, num_seqs=128)
-            embeddings = encoder.batch_encode(inputs)
-            self.msa_list.append(embeddings[0])
+    def __init__(self, data, num_seqs):
+        self.seqs = []
+        self.msas = []
+        
+        for filename in tqdm(os.listdir(data)):
+            msa = read_msa(os.path.join(data, filename))
+            msa_filtered = greedy_select(msa, num_seqs)
+            self.msas.append(msa_filtered)
+            self.seqs.append(msa[0])
         
     def __len__(self):
-        return len(self.msa_list)
+        return len(self.msas)
     
     def __getitem__(self, idx):
-        return self.msa_list[idx]
+        return self.seqs[idx], self.msas[idx]
