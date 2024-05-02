@@ -54,14 +54,13 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
     return [msa[idx] for idx in indices]
 
 class MSADataset(Dataset):
-    def __init__(self, data, num_seqs):
+    def __init__(self, data):
         self.seqs = []
         self.msas = []
         
         for filename in tqdm(os.listdir(data)):
             msa = read_msa(os.path.join(data, filename))
-            msa_filtered = greedy_select(msa, num_seqs)
-            self.msas.append(msa_filtered)
+            self.msas.append(msa)
             self.seqs.append(msa[0])
         
     def __len__(self):

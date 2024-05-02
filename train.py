@@ -1,19 +1,18 @@
 import torch
 from model import MSAScoreEstimatorEMB
-from preprocess import MSADataset
+from preprocess import MSADataset, greedy_select
 from torch.utils.data import DataLoader
-from model.score_estimator import ScoreEstimatorEMB
 from diffusion_utils.diffusion_dynamic_sde import create_sde, create_solver
 from config import create_config
 from typing import Dict
-from utils.setup_ddp import setup_ddp
 import torch.distributed as dist
 import os
 import esm
 import numpy as np
 import pickle as pkl
+from tqdm import tqdm
 
-device = "cuda:0"
+device = "cuda:1"
 
 msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
 msa_batch_converter = msa_alphabet.get_batch_converter()
@@ -27,12 +26,13 @@ seq_encoder.eval()
 
 def collate_fn(data):
     seqs, msas = zip(*data)
-    _, _, msa_tokens = msa_batch_converter(msas)
+    msas_filtered = [greedy_select(msa, num_seqs=128) for msa in msas]
+    _, _, msa_tokens = msa_batch_converter(msas_filtered)
     _, _, seq_tokens = seq_batch_converter(seqs)
     
     with torch.no_grad():
-        msa_embeddings = msa_encoder(msa_tokens, repr_layers=[12])["representations"][12]
-        seq_embeddings = seq_encoder(seq_tokens, repr_layers=[6])["representations"][6]
+        msa_embeddings = msa_encoder(msa_tokens.to(device), repr_layers=[12])["representations"][12]
+        seq_embeddings = seq_encoder(seq_tokens.to(device), repr_layers=[6])["representations"][6]
     
     return seq_embeddings, msa_embeddings
 
@@ -55,7 +55,7 @@ def mse_loss(inputs, targets, mask):
     if mask is None:
         mask = torch.ones(
             (targets.shape[0], targets.shape[1], targets.shape[2]),
-            device="cpu",
+            device=device,
             requires_grad=False,
             dtype=torch.int64,
         )
@@ -74,75 +74,76 @@ args = {
     "activation_dropout": 0.1,
     "num_rows": 128,
     "max_tokens": 2 ** 14,
-    "max_position_embeddings": 512
+    "max_position_embeddings": 1024
 }
 
-train_dataset = MSADataset("./databases/msa_transformer/data/a3m", num_seqs=128)
-train_loader = DataLoader(train_dataset, batch_size=5, collate_fn=collate_fn)
+train_dataset = MSADataset("./databases/msa_transformer/data/a3m")
+train_loader = DataLoader(train_dataset, batch_size=2, collate_fn=collate_fn)
 
 config = create_config()
 sde = create_sde(config=config, score_fn=calc_score)
 diff_eq_solver = create_solver(config, sde, ode_sampling=config.sde.ode_sampling)
+score_estimator = MSAScoreEstimatorEMB(args).to(device)
 
-for seq, msa in train_loader:
-    # Noising
-    clean_x = msa
-    batch_size = clean_x.size(0)
-    t = sample_time(batch_size).to(device)
-    marg_forward = sde.marginal_forward(clean_x, t)
-    x_t, noise, score_clean = marg_forward['x_t'], marg_forward['noise'], marg_forward['score']
-    print(x_t)
+optimizer = torch.optim.AdamW(
+    score_estimator.parameters(),
+    lr=config.optim.lr,
+    weight_decay=config.optim.weight_decay,
+    betas=(config.optim.beta_1, config.optim.beta_2),
+    eps=config.optim.eps
+)
 
-    # self-cond estimate
-    # x_0_self_cond = torch.zeros_like(x_t, dtype=x_t.dtype)
-    # x_0_self_cond = score_estimator(
-    #     x_t=x_t,
-    #     query=seq,
-    #     time_t=t,
-    #     attention_mask=None,
-    #     x_0_self_cond=x_0_self_cond
-    # )
+for epoch in range(10):
+    total_loss_x_0 = 0
+    total_loss_eps = 0
+    total_loss_score = 0
+    
+    for seq, msa in tqdm(train_loader):
+        optimizer.zero_grad()
+        
+        # Noising
+        clean_x = msa
+        batch_size = clean_x.size(0)
+        t = sample_time(batch_size).to(device)
+        marg_forward = sde.marginal_forward(clean_x, t)
+        x_t, noise, score_clean = marg_forward['x_t'], marg_forward['noise'], marg_forward['score']
 
-    # # model prediction
-    # scores = calc_score(
-    #     score_estimator,
-    #     x_t,
-    #     seq,
-    #     t,
-    #     mask=None,
-    #     x_0_self_cond=x_0_self_cond,
-    # )
+        # self-cond estimate
+        x_0_self_cond = torch.zeros_like(x_t, dtype=x_t.dtype)
+        x_0_self_cond = score_estimator(
+            x_t=x_t,
+            query=seq,
+            time_t=t,
+            attention_mask=None,
+            x_0_self_cond=x_0_self_cond
+        )
 
-    # # MSE losses
-    # x_0, eps_theta, score = scores["x_0"], scores['eps_theta'], scores["score"]
+        # model prediction
+        scores = calc_score(
+            score_estimator,
+            x_t,
+            seq,
+            t,
+            mask=None,
+            x_0_self_cond=x_0_self_cond,
+        )
 
-    # print(x_0.shape, clean_x.shape)
-    # print(eps_theta.shape, noise.shape)
-    # print(score.shape, score.shape)
+        # MSE losses
+        x_0, eps_theta, score = scores["x_0"], scores['eps_theta'], scores["score"]
 
-    # loss_x_0 = mse_loss(clean_x, x_0, mask=None)
-    # loss_eps = mse_loss(noise, eps_theta, mask=None)
-    # loss_score = mse_loss(score_clean, score, mask=None)
+        loss_x_0 = mse_loss(clean_x, x_0, mask=None)
+        loss_eps = mse_loss(noise, eps_theta, mask=None)
+        loss_score = mse_loss(score_clean, score, mask=None)
+        
+        loss_x_0.backward()
+        optimizer.step()
 
-    # print("loss_x_0", loss_x_0)
-    # print("loss_eps", loss_eps)
-    # print("loss_score", loss_score)
-
-
-
-
-
-
-
-
-
-# score_estimator = MSAScoreEstimatorEMB(args).to(device="cuda:8")
-# model_parameters = filter(lambda p: p.requires_grad, score_estimator.parameters())
-# params = sum([np.prod(p.size()) for p in model_parameters])
-
-# score_estimator_2 = ScoreEstimatorEMB(input_size=320, config=config.bert_config)
-# model_parameters_2 = filter(lambda p: p.requires_grad, score_estimator_2.parameters())
-# params_2 = sum([np.prod(p.size()) for p in model_parameters_2])
-
-# score_estimator(x_t=msa, query=seq, time_t=t, x_0_self_cond=msa)
-
+        total_loss_x_0 += loss_x_0.item()
+        total_loss_eps += loss_eps.item()
+        total_loss_score += loss_score.item()
+        
+        torch.cuda.empty_cache()
+        
+    print("loss_x_0", total_loss_x_0/len(train_loader))
+    print("loss_eps", total_loss_eps/len(train_loader))
+    print("loss_score", total_loss_score/len(train_loader))

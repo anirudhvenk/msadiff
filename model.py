@@ -46,7 +46,7 @@ TransformerBlock = MSATransformerBlock
 class TransformerEncoder(torch.nn.Module):
     def __init__(self, args):
         super().__init__()
-        self.num_hidden_layers = 4
+        self.num_hidden_layers = 1
         self.hidden_size = args["embed_dim"]
         self.input_blocks = torch.nn.ModuleList(
             [TransformerBlock(args) for _ in range(0, self.num_hidden_layers // 2)]
@@ -149,7 +149,7 @@ class MSAScoreEstimatorEMB(nn.Module):
         hidden_t = self.time_emb(emb_t)
         hidden_t = hidden_t[:, None, :].unsqueeze(1)
 
-        seq_length = query.size(1)
+        seq_length = x_t.size(2)
         position_ids = self.position_ids[:, :, :seq_length]
         emb_pos = self.position_embeddings(position_ids)
 
