@@ -1,5 +1,4 @@
 import ml_collections
-from transformers import BertConfig
 
 def create_config():
     config = ml_collections.ConfigDict()
@@ -45,50 +44,29 @@ def create_config():
     sde.scheduler = "sd"
 
     model = config.model = ml_collections.ConfigDict()
-    model.ema_rate = 0.9999
-    model.embeddings_type = "encodings"
-    model.dif_enc_type = "base"
     model.prediction = "x_0"
-    model.loss = "L_x_0"
-    model.hidden_size = 320
-    model.hg_name = "facebook/esm2_t6_8M_UR50D"
-    model.hg_name_hash = "esm2-8M"
+    model.ema_rate = 0.9999
+    model.dropout = 0.1
+    model.seq_embed_dim = 320
+    model.embed_dim = 768
+    model.ffn_embed_dim = 3072
+    model.attention_heads = 8
+    model.attention_dropout = 0.1
+    model.activation_dropout = 0.1
+    model.max_tokens = 2 ** 14
+    model.num_hidden_layers = 2
+    model.max_position_embeddings = 512
 
     data = config.data = ml_collections.ConfigDict()
+    data.num_rows = 64
+    data.batch_size = 1
     data.max_sequence_len = 256
-    data.dataset = "AFDB"
-    data.train_dataset_path = f'./data/{data.dataset}/AFDBv4_90.128-254-train.fasta'
-    data.test_dataset_path = f'./data/{data.dataset}/AFDBv4_90.128-254-valid.fasta'
+    data.train_dataset_path = "./databases/msa_transformer/data/a3m"
+    data.test_dataset_path = "./databases/msa_transformer/data/a3m"
     
-    data.enc_mean = f"./data/{data.dataset}/encodings-{model.hg_name_hash}-mean.pt"
-    data.enc_std = f"./data/{data.dataset}/encodings-{model.hg_name_hash}-mean.pt"
-    
-    config.decoder_path = f"./checkpoints/decoder-{config.model.hg_name_hash}-{config.data.dataset}.pth"
     config.seed = 0
     config.ddp = True
     config.use_self_cond = True
-    config.bert_config = bert_config
-    config.project_name = "proteins_dif"
+    config.device = "cuda:1"
 
     return config
-
-
-bert_config = BertConfig(**{
-    "hidden_size": 320,
-    "hidden_act": "gelu",
-    "initializer_range": 0.02,
-    "vocab_size": 30522,
-    "hidden_dropout_prob": 0.1,
-    "num_attention_heads": 16,
-    "type_vocab_size": 2,
-    "max_position_embeddings": 512,
-    "num_hidden_layers": 12,
-    "intermediate_size": 3072,
-    "attention_probs_dropout_prob": 0.1,
-    "layer_norm_eps": 1e-12,
-    "model_type": "bert",
-    "pad_token_id": 0,
-    "position_embedding_type": "absolute",
-    "transformers_version": "4.6.0.dev0",
-    "is_decoder": False,
-})

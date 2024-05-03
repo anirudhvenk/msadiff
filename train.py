@@ -12,7 +12,9 @@ import numpy as np
 import pickle as pkl
 from tqdm import tqdm
 
-device = "cuda:1"
+config = create_config()
+
+device = config.device
 
 msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
 msa_batch_converter = msa_alphabet.get_batch_converter()
@@ -26,22 +28,26 @@ seq_encoder.eval()
 
 def collate_fn(data):
     seqs, msas = zip(*data)
-    msas_filtered = [greedy_select(msa, num_seqs=128) for msa in msas]
+    msas_filtered = [greedy_select(msa, num_seqs=config.data.num_rows) for msa in msas]
     _, _, msa_tokens = msa_batch_converter(msas_filtered)
     _, _, seq_tokens = seq_batch_converter(seqs)
     
     with torch.no_grad():
         msa_embeddings = msa_encoder(msa_tokens.to(device), repr_layers=[12])["representations"][12]
-        seq_embeddings = seq_encoder(seq_tokens.to(device), repr_layers=[6])["representations"][6]
+        seq_embeddings = seq_encoder(seq_tokens.to(device), repr_layers=[6])["representations"][6][:,1:,:]
+        
+    msa_mean = torch.mean(msa_embeddings, dim=-1).unsqueeze(-1)
+    msa_std = torch.std(msa_embeddings, dim=-1).unsqueeze(-1)
+    msa_embeddings_normalized = (msa_embeddings - msa_mean) / msa_std
     
-    return seq_embeddings, msa_embeddings
+    return seq_embeddings, msa_embeddings_normalized
 
 def sample_time(batch_size: int, eps: float = 1e-5):
     return torch.FloatTensor(batch_size).uniform_() * (sde.T - eps) + eps
 
-def calc_score(model, x_t, query, t, mask=None, x_0_self_cond=None) -> Dict[str, torch.Tensor]:
+def calc_score(model, x_t, query, t, cross_attn_padding_mask=None, x_0_self_cond=None) -> Dict[str, torch.Tensor]:
     params = sde.marginal_params_tensor(x_t, t)
-    x_0 = model(x_t=x_t, query=query, time_t=t, attention_mask=mask, x_0_self_cond=x_0_self_cond)
+    x_0 = model(x_t=x_t, query=query, time_t=t, cross_attn_padding_mask=cross_attn_padding_mask, x_0_self_cond=x_0_self_cond)
     eps_theta = (x_t - params["alpha"] * x_0) / params["std"]
     score = -eps_theta / params["std"]
 
@@ -64,26 +70,12 @@ def mse_loss(inputs, targets, mask):
     loss = torch.sum(losses) / torch.sum(mask)
     return loss
 
-args = {
-    "seq_embed_dim": 320,
-    "embed_dim": 768,
-    "ffn_embed_dim": 3072,
-    "attention_heads": 12,
-    "dropout": 0.1,
-    "attention_dropout": 0.1,
-    "activation_dropout": 0.1,
-    "num_rows": 128,
-    "max_tokens": 2 ** 14,
-    "max_position_embeddings": 1024
-}
+train_dataset = MSADataset(config.data.train_dataset_path)
+train_loader = DataLoader(train_dataset, batch_size=config.data.batch_size, collate_fn=collate_fn)
 
-train_dataset = MSADataset("./databases/msa_transformer/data/a3m")
-train_loader = DataLoader(train_dataset, batch_size=2, collate_fn=collate_fn)
-
-config = create_config()
 sde = create_sde(config=config, score_fn=calc_score)
 diff_eq_solver = create_solver(config, sde, ode_sampling=config.sde.ode_sampling)
-score_estimator = MSAScoreEstimatorEMB(args).to(device)
+score_estimator = MSAScoreEstimatorEMB(config).to(device)
 
 optimizer = torch.optim.AdamW(
     score_estimator.parameters(),
@@ -114,18 +106,18 @@ for epoch in range(10):
             x_t=x_t,
             query=seq,
             time_t=t,
-            attention_mask=None,
+            cross_attn_padding_mask=None,
             x_0_self_cond=x_0_self_cond
         )
 
         # model prediction
         scores = calc_score(
             score_estimator,
-            x_t,
-            seq,
-            t,
-            mask=None,
-            x_0_self_cond=x_0_self_cond,
+            x_t=x_t,
+            query=seq,
+            t=t,
+            cross_attn_padding_mask=None,
+            x_0_self_cond=x_0_self_cond
         )
 
         # MSE losses

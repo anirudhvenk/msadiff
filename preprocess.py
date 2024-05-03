@@ -60,8 +60,9 @@ class MSADataset(Dataset):
         
         for filename in tqdm(os.listdir(data)):
             msa = read_msa(os.path.join(data, filename))
-            self.msas.append(msa)
-            self.seqs.append(msa[0])
+            if (len(msa[0][1]) <= 256):
+                self.msas.append(msa)
+                self.seqs.append(msa[0])
         
     def __len__(self):
         return len(self.msas)

@@ -2,40 +2,38 @@ import torch
 import torch.nn as nn
 import math
 from typing import Optional
-from modules import AxialTransformerLayer
+from modules import MSATransformerLayer
 from esm.modules import ESM1bLayerNorm
-from preprocess import MSADataset
-from torch.utils.data import Dataset, DataLoader
 
 class MSATransformerBlock(nn.Module):
-    def __init__(self, args):
+    def __init__(self, config):
         super().__init__()
-        self.args = args
         
-        self.dropout_module = nn.Dropout(self.args["dropout"])
-        self.axial_transformer_layer = AxialTransformerLayer(
-            self.args["seq_embed_dim"],
-            self.args["embed_dim"],
-            self.args["ffn_embed_dim"],
-            self.args["attention_heads"],
-            self.args["dropout"],
-            self.args["attention_dropout"],
-            self.args["activation_dropout"],
-            self.args["max_tokens"]
+        self.dropout_module = nn.Dropout(config.model.dropout)
+        self.axial_transformer_layer = MSATransformerLayer(
+            config.model.seq_embed_dim,
+            config.model.embed_dim,
+            config.model.ffn_embed_dim,
+            config.model.attention_heads,
+            config.model.dropout,
+            config.model.attention_dropout,
+            config.model.activation_dropout,
+            config.model.max_tokens
         )
         
-        self.emb_layer_norm_before = ESM1bLayerNorm(self.args["embed_dim"])
-        self.emb_layer_norm_after = ESM1bLayerNorm(self.args["embed_dim"])
+        self.emb_layer_norm_before = ESM1bLayerNorm(config.model.embed_dim)
+        self.emb_layer_norm_after = ESM1bLayerNorm(config.model.embed_dim)
         
-    def forward(self, seq, msa):
+    def forward(self, seq, msa, cross_attn_padding_mask):
         msa = self.emb_layer_norm_before(msa)
         msa = self.dropout_module(msa)
         
         # B x R x C x D -> R x C x B x D
         msa = msa.permute(1, 2, 0, 3)
+        # B X C X D -> C x B x D
         seq = seq.permute(1, 0, 2)
         
-        msa = self.axial_transformer_layer(x=msa, query=seq)
+        msa = self.axial_transformer_layer(x=msa, query=seq, cross_attn_padding_mask=cross_attn_padding_mask)
         msa = self.emb_layer_norm_after(msa)
         msa = msa.permute(2, 0, 1, 3)
              
@@ -44,15 +42,15 @@ class MSATransformerBlock(nn.Module):
 TransformerBlock = MSATransformerBlock 
    
 class TransformerEncoder(torch.nn.Module):
-    def __init__(self, args):
+    def __init__(self, config):
         super().__init__()
-        self.num_hidden_layers = 1
-        self.hidden_size = args["embed_dim"]
+        self.num_hidden_layers = config.model.num_hidden_layers
+        self.hidden_size = config.model.embed_dim
         self.input_blocks = torch.nn.ModuleList(
-            [TransformerBlock(args) for _ in range(0, self.num_hidden_layers // 2)]
+            [TransformerBlock(config) for _ in range(0, self.num_hidden_layers // 2)]
         )
         self.output_blocks = torch.nn.ModuleList(
-            [TransformerBlock(args) for _ in range(0, self.num_hidden_layers // 2)]
+            [TransformerBlock(config) for _ in range(0, self.num_hidden_layers // 2)]
         )
         self.time_layers = torch.nn.ModuleList(
             [nn.Linear(self.hidden_size, self.hidden_size) for _ in range(0, self.num_hidden_layers)]
@@ -65,7 +63,7 @@ class TransformerEncoder(torch.nn.Module):
             self,
             x: torch.Tensor,
             query: torch.Tensor,
-            attention_mask: Optional[torch.FloatTensor] = None,
+            cross_attn_padding_mask: Optional[torch.FloatTensor] = None,
             emb_t=None,
             x_0_self_cond=None,
     ):
@@ -77,7 +75,7 @@ class TransformerEncoder(torch.nn.Module):
             x = block(
                 seq=query,
                 msa=x,
-                # attention_mask=attention_mask
+                cross_attn_padding_mask=cross_attn_padding_mask
             )
 
         for i, block in enumerate(self.output_blocks):
@@ -86,11 +84,10 @@ class TransformerEncoder(torch.nn.Module):
             x = block(
                 seq=query,
                 msa=x,
-                # attention_mask=attention_mask
+                cross_attn_padding_mask=cross_attn_padding_mask
             )
 
         return x
-
 
 def timestep_embedding(timesteps, dim, max_period=10000):
     """
@@ -111,12 +108,11 @@ def timestep_embedding(timesteps, dim, max_period=10000):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
 
-
 class MSAScoreEstimatorEMB(nn.Module):
-    def __init__(self, args):
+    def __init__(self, config):
         super(MSAScoreEstimatorEMB, self).__init__()
 
-        hidden_layer_dim = args["embed_dim"]
+        hidden_layer_dim = config.model.embed_dim
         self._hidden_layer_dim = hidden_layer_dim
         self.time_emb = torch.nn.Sequential(
             torch.nn.Linear(hidden_layer_dim, hidden_layer_dim * 2),
@@ -124,23 +120,18 @@ class MSAScoreEstimatorEMB(nn.Module):
             torch.nn.Linear(hidden_layer_dim * 2, hidden_layer_dim)
         )
 
-        self.encoder = TransformerEncoder(args)
+        self.encoder = TransformerEncoder(config)
 
-        self._max_position_embeddings = args["max_position_embeddings"]
-        self.register_buffer("position_ids", torch.arange(self._max_position_embeddings).expand((1, args["num_rows"], -1)))
+        self._max_position_embeddings = config.model.max_position_embeddings
+        self.register_buffer("position_ids", torch.arange(self._max_position_embeddings).expand((1, config.data.num_rows, -1)))
         self.position_embeddings = torch.nn.Embedding(self._max_position_embeddings, self._hidden_layer_dim)
-
-    def get_extended_attention_mask(self, attention_mask, dtype):
-        extended_attention_mask = attention_mask[:, None, None, :]
-        extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(dtype).min
-        return extended_attention_mask
 
     def forward(
             self,
             x_t: torch.Tensor,
             query: torch.Tensor,
             time_t: Optional[torch.Tensor] = None,
-            attention_mask=None,
+            cross_attn_padding_mask=None,
             x_0_self_cond=None,
     ):
         assert time_t is not None
@@ -156,16 +147,10 @@ class MSAScoreEstimatorEMB(nn.Module):
         emb_x = x_t
         hidden_state = emb_x + emb_pos
 
-        if attention_mask is not None:
-            attention_mask = self.get_extended_attention_mask(
-                attention_mask=attention_mask,
-                dtype=hidden_state.dtype
-            )
-
         output = self.encoder(
             x=hidden_state,
             query=query,
-            attention_mask=attention_mask,
+            cross_attn_padding_mask=cross_attn_padding_mask,
             emb_t=hidden_t,
             x_0_self_cond=x_0_self_cond,
         )
