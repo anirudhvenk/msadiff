@@ -127,7 +127,7 @@ class MSATransformerLayer(nn.Module):
         query_dim: int = 320,
         embedding_dim: int = 768,
         ffn_embedding_dim: int = 3072,
-        num_attention_heads: int = 8,
+        num_attention_heads: int = 12,
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         activation_dropout: float = 0.1,
@@ -154,7 +154,7 @@ class MSATransformerLayer(nn.Module):
             max_tokens_per_msa=max_tokens_per_msa,
         )
 
-        self.row_cross_attention = self.build_residual(self.msa_cross_attention)
+        self.msa_cross_attention = self.build_residual(self.msa_cross_attention)
         self.feed_forward_layer = self.build_residual(self.feed_forward_layer)
 
     def build_residual(self, layer: nn.Module):        
