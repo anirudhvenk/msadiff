@@ -1,11 +1,13 @@
 from model import MSAScoreEstimatorEMB
-from data import MSADataset, collate_fn
+from data import MSADataset, collate_fn, encode
 from torch.utils.data import DataLoader
 from diffusion_utils.diffusion_dynamic_sde import create_sde, create_solver
 from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from config import create_config
 from typing import Dict
 from random import random
+import torch.multiprocessing as mp
 import torch
 import os
 import esm
@@ -20,27 +22,17 @@ class DiffusionRunner:
         self.device = config.device
         
         train_dataset = MSADataset(self.config.data.train_dataset_path)
+        
         self.train_loader = DataLoader(
             train_dataset, 
             batch_size=self.config.data.batch_size, 
-            collate_fn=collate_fn
-        )
-
-        val_dataset = MSADataset(self.config.data.test_dataset_path, validation=True)
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config.data.batch_size, 
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
+            pin_memory=False
         )
 
         self.sde = create_sde(config=self.config, score_fn=self.calc_score)
         self.diff_eq_solver = create_solver(self.config, self.sde, ode_sampling=self.config.sde.ode_sampling)
-        self.score_estimator = MSAScoreEstimatorEMB(self.config).to(self.device)
-        self.score_estimator = torch.nn.parallel.DistributedDataParallel(
-            self.score_estimator,
-            device_ids=[0,1,2,3,4,5,6,7,8,9],
-            broadcast_buffers=False
-        )
+        self.score_estimator = MSAScoreEstimatorEMB(self.config).to(config.device)
         
         self.optimizer = torch.optim.AdamW(
             self.score_estimator.parameters(),
@@ -124,13 +116,13 @@ class DiffusionRunner:
         loss_eps = self.mse_loss(noise, eps_theta, mask=None)
         loss_score = self.mse_loss(score_clean, score, mask=None)
         
-        return t.detach(), loss_x_0, loss_eps, loss_score
+        return loss_x_0, loss_eps, loss_score
 
     def optimizer_step(self, loss):
         self.optimizer.zero_grad()
         self.grad_scaler.scale(loss).backward()
         self.grad_scaler.unscale_(self.optimizer)
-        grad_norm = torch.sqrt(sum([torch.sum(t.grad ** 2) for t in self.score_estimator.parameters()]))
+        grad_norm = torch.sqrt(sum([torch.sum((t.grad).to(config.device) ** 2) for t in self.score_estimator.parameters()]))
         torch.nn.utils.clip_grad_norm_(
             self.score_estimator.parameters(),
             max_norm=self.config.optim.grad_clip_norm
@@ -158,45 +150,16 @@ class DiffusionRunner:
             val_loss_eps = 0
             val_loss_score = 0
             
-            for seq, msa in tqdm(self.train_loader):
-                t, loss_x_0, loss_eps, loss_score = self.calc_loss(seq, msa)
+            for seq_tokens, msa_tokens in tqdm(self.train_loader):
+                seq_embeddings, msa_embeddings = encode(seq_tokens, msa_tokens)
+                
+                loss_x_0, loss_eps, loss_score = self.calc_loss(seq_embeddings.to(config.device), msa_embeddings.to(config.device))
                 self.optimizer_step(loss_x_0)
-
-                if (t < 0.1):
-                    all_ts.append(t)
-                    total_loss_x_0 += loss_x_0.detach().item()
-                    total_loss_eps += loss_eps.detach().item()
-                    total_loss_score += loss_score.detach().item()
                 
                 torch.cuda.empty_cache()
-            
-            for seq, msa in tqdm(self.val_loader):
-                with torch.no_grad():
-                    t, loss_x_0, loss_eps, loss_score = self.calc_loss(seq, msa)
-                
-                if (t < 0.1):
-                    all_ts_val.append(t)
-                    val_loss_x_0 += loss_x_0.detach().item()
-                    val_loss_eps += loss_eps.detach().item()
-                    val_loss_score += loss_score.detach().item()
-            
-            if (len(all_ts) > 0):
-                print("loss_x_0", total_loss_x_0/len(all_ts))
-                print("loss_eps", total_loss_eps/len(all_ts))
-                print("loss_score", total_loss_score/len(all_ts))
-            
-            if (len(all_ts_val) > 0):
-                print("val_loss_x_0", val_loss_x_0/len(all_ts_val))
-                print("val_loss_eps", val_loss_eps/len(all_ts_val))
-                print("val_loss_score", val_loss_score/len(all_ts_val))
 
-if __name__ == "__main___":
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    # torch.cuda.set_device(10)
-    torch.distributed.init_process_group("nccl", world_size=10, rank=9)
-    # torch.distributed.barrier()    
-
+if __name__ == "__main__":
     config = create_config()
+    
     runner = DiffusionRunner(config)
     runner.train(10)

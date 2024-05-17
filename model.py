@@ -44,13 +44,14 @@ TransformerBlock = MSATransformerBlock
 class TransformerEncoder(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.num_hidden_layers = config.model.num_hidden_layers
-        self.hidden_size = config.model.embed_dim
+        self.config = config
+        self.num_hidden_layers = self.config.model.num_hidden_layers
+        self.hidden_size = self.config.model.embed_dim
         self.input_blocks = torch.nn.ModuleList(
-            [TransformerBlock(config) for _ in range(0, self.num_hidden_layers // 2)]
+            [TransformerBlock(self.config) for i in range(0, self.num_hidden_layers // 2)]
         )
         self.output_blocks = torch.nn.ModuleList(
-            [TransformerBlock(config) for _ in range(0, self.num_hidden_layers // 2)]
+            [TransformerBlock(self.config) for i in range(0, self.num_hidden_layers // 2)]
         )
         self.time_layers = torch.nn.ModuleList(
             [nn.Linear(self.hidden_size, self.hidden_size) for _ in range(0, self.num_hidden_layers)]
@@ -70,24 +71,35 @@ class TransformerEncoder(torch.nn.Module):
         x_input_list = []
 
         for i, block in enumerate(self.input_blocks):
+            device = f"cuda:{i}"
             x_input_list.append(x)
-            x = x + self.time_layers[i](emb_t) + self.self_cond_layers[i](x_0_self_cond)
+            block = block.to(device)
+            self.time_layers[i] = self.time_layers[i].to(device)
+            self.self_cond_layers[i] = self.self_cond_layers[i].to(device)
+
+            x = x.to(device) + self.time_layers[i](emb_t.to(device)) + self.self_cond_layers[i](x_0_self_cond.to(device))
+            
             x = block(
-                seq=query,
+                seq=query.to(device),
                 msa=x,
-                cross_attn_padding_mask=cross_attn_padding_mask
+                cross_attn_padding_mask=cross_attn_padding_mask.to(device) if cross_attn_padding_mask is not None else None
             )
 
         for i, block in enumerate(self.output_blocks):
             ind = i + self.num_hidden_layers // 2
-            x = x + x_input_list.pop() + self.time_layers[ind](emb_t) + self.self_cond_layers[ind](x_0_self_cond)
+            device = f"cuda:{i}"
+            block = block.to(device)
+            self.time_layers[ind] = self.time_layers[ind].to(device)
+            self.self_cond_layers[ind] = self.self_cond_layers[ind].to(device)
+            
+            x = x.to(device) + x_input_list.pop().to(device) + self.time_layers[ind](emb_t.to(device)) + self.self_cond_layers[ind](x_0_self_cond.to(device))
             x = block(
-                seq=query,
+                seq=query.to(device),
                 msa=x,
                 cross_attn_padding_mask=cross_attn_padding_mask
             )
 
-        return x
+        return x.to(self.config.device)
 
 def timestep_embedding(timesteps, dim, max_period=10000):
     """

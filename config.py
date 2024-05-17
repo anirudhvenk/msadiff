@@ -59,7 +59,7 @@ def create_config():
 
     data = config.data = ml_collections.ConfigDict()
     data.num_rows = 64
-    data.batch_size = 1
+    data.batch_size = 5
     data.max_sequence_len = 256
     data.train_dataset_path = "./databases/openfold/openfold_a3m/scratch/alignments"
     data.test_dataset_path = "./databases/msa_transformer/data/a3m"
@@ -67,6 +67,8 @@ def create_config():
     config.seed = 0
     config.ddp = True
     config.use_self_cond = True
-    config.device = "cuda:9"
+    config.device = "cuda:6"
+    config.world_size = 10
+    config.rank = 9
 
     return config

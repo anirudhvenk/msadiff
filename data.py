@@ -16,14 +16,13 @@ from esm.data import BatchConverter
 config = create_config()
 
 msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
-batch_converter = BatchConverter(msa_alphabet)
-msa_batch_converter = msa_alphabet.get_batch_converter(truncation_seq_length=100)
-msa_encoder.to(config.device)
+msa_batch_converter = msa_alphabet.get_batch_converter()
+msa_encoder.to("cuda:0")
 msa_encoder.eval()
 
 seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
 seq_batch_converter = seq_alphabet.get_batch_converter()
-seq_encoder.to(config.device)
+seq_encoder.to("cuda:0")
 seq_encoder.eval()
 
 # This is an efficient way to delete lowercase characters and insertion characters from a string
@@ -74,10 +73,19 @@ def collate_fn(data):
     _, _, msa_tokens = msa_batch_converter(msas_filtered)
     _, _, seq_tokens = seq_batch_converter(seqs)
     
+    return seq_tokens, msa_tokens
+
+def encode(seq_tokens, msa_tokens):
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            msa_embeddings = msa_encoder(msa_tokens.to(config.device), repr_layers=[12])["representations"][12]
-            seq_embeddings = seq_encoder(seq_tokens.to(config.device), repr_layers=[6])["representations"][6][:,1:,:]
+            msa_embeddings = msa_encoder(
+                msa_tokens.to("cuda:0"), 
+                repr_layers=[12]
+            )["representations"][12]
+            seq_embeddings = seq_encoder(
+                seq_tokens.to("cuda:0"), 
+                repr_layers=[6]
+            )["representations"][6][:,1:,:]
         
     msa_mean = torch.mean(msa_embeddings, dim=-1).unsqueeze(-1)
     msa_std = torch.std(msa_embeddings, dim=-1).unsqueeze(-1)
@@ -94,14 +102,14 @@ class MSADataset(Dataset):
             for filename in tqdm(os.listdir(data)):
                 msa = read_msa(os.path.join(data, filename))
                 if (len(msa[0][1]) <= 256 and len(msa) >= 64 and len(msa) <= 4096):
-                    self.msas.append(msa)
+                    self.msas.append(greedy_select(msa, num_seqs=config.data.num_rows))
                     self.seqs.append(msa[0])
         else:
-            for filename in tqdm(os.listdir(data)[:10]):
+            for filename in tqdm(os.listdir(data)[:200]):
                 for data_dir in os.listdir(os.path.join(data, filename)):
                     msa = read_msa(os.path.join(os.path.join(data, filename), data_dir))
                     if (len(msa[0][1]) <= 256 and len(msa) >= 64):
-                        self.msas.append(msa)
+                        self.msas.append(greedy_select(msa, num_seqs=config.data.num_rows))
                         self.seqs.append(msa[0])
         
     def __len__(self):
@@ -109,55 +117,3 @@ class MSADataset(Dataset):
     
     def __getitem__(self, idx):
         return self.seqs[idx], self.msas[idx]
-    
-def tokenize_data(data):
-    all_msa_embeddings = []
-    all_seq_embeddings = []
-    
-    for filename in tqdm(os.listdir(data)[:2000]):
-        for data_dir in os.listdir(os.path.join(data, filename)):
-        # msa = read_msa(os.path.join(data, filename))
-            msa = read_msa(os.path.join(os.path.join(data, filename), data_dir))
-            if (len(msa[0][1]) <= 256 and len(msa) >= 128 and len(msa) <= 4096):
-                seq = [msa[0]]
-                msas_filtered = [(greedy_select(msa, num_seqs=config.data.num_rows))]
-                _, _, seq_tokens = seq_batch_converter(seq)
-                padding = torch.full((1, 256-seq_tokens.shape[1]), seq_alphabet.padding_idx)
-                seq_tokens = torch.cat((seq_tokens, padding), dim=1)
-            
-                tokens = torch.empty(
-                    (
-                        1,
-                        128,
-                        255 + int(msa_alphabet.prepend_bos) + int(msa_alphabet.append_eos),
-                    ),
-                    dtype=torch.int64,
-                )
-                tokens.fill_(msa_alphabet.padding_idx)
-
-                for i, msa in enumerate(msas_filtered):
-                    msa_seqlens = set(len(seq) for _, seq in msa)
-                    if not len(msa_seqlens) == 1:
-                        raise RuntimeError(
-                            "Received unaligned sequences for input to MSA, all sequence "
-                            "lengths must be equal."
-                        )
-                    msa_labels, msa_strs, msa_tokens = batch_converter.__call__(msa)
-                    tokens[i, : msa_tokens.size(0), : msa_tokens.size(1)] = msa_tokens
-
-                with torch.no_grad():
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        msa_embeddings = msa_encoder(tokens.to(config.device), repr_layers=[12])["representations"][12]
-                        seq_embeddings = seq_encoder(seq_tokens.to(config.device), repr_layers=[6])["representations"][6]
-                        
-                msa_mean = torch.mean(msa_embeddings, dim=-1).unsqueeze(-1)
-                msa_std = torch.std(msa_embeddings, dim=-1).unsqueeze(-1)
-                msa_embeddings_normalized = (msa_embeddings - msa_mean) / msa_std
-                
-                all_msa_embeddings.append(msa_embeddings_normalized.squeeze(0))
-                all_seq_embeddings.append(seq_embeddings.squeeze(0))
-            
-    torch.save(torch.stack(all_msa_embeddings), "./databases/dummy/msas.pt")
-    torch.save(torch.stack(all_seq_embeddings), "./databases/dummy/seqs.pt")
-
-tokenize_data("./databases/openfold/a3m/scratch/alignments")
