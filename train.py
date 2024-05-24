@@ -8,6 +8,7 @@ from config import create_config
 from typing import Dict
 from random import random
 import torch.multiprocessing as mp
+import torch.distributed as dist
 import torch
 import os
 import esm
@@ -15,16 +16,34 @@ import numpy as np
 import pickle as pkl
 from tqdm import tqdm
 from torch.cuda.amp import GradScaler
+from torchsummary import summary
 
 class DiffusionRunner:
     def __init__(self, config):
         self.config = config
-        self.device = config.device
+        self.device = config.local_rank
         
-        train_dataset = MSADataset(self.config.data.train_dataset_path)
+        self.train_dataset = MSADataset(self.config.data.train_dataset_path)
+        print(len(self.train_dataset))
+        
+        self.msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+        self.msa_encoder.to(self.device)
+        self.msa_encoder.eval()
+
+        self.seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+        self.seq_encoder.to(self.device)
+        self.seq_encoder.eval()
+        
+        sampler_train = torch.utils.data.DistributedSampler(
+            self.train_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=False
+        )
         
         self.train_loader = DataLoader(
-            train_dataset, 
+            self.train_dataset, 
+            sampler=sampler_train,
             batch_size=self.config.data.batch_size, 
             collate_fn=collate_fn,
             pin_memory=False
@@ -32,7 +51,8 @@ class DiffusionRunner:
 
         self.sde = create_sde(config=self.config, score_fn=self.calc_score)
         self.diff_eq_solver = create_solver(self.config, self.sde, ode_sampling=self.config.sde.ode_sampling)
-        self.score_estimator = MSAScoreEstimatorEMB(self.config).to(config.device)
+        self.score_estimator = MSAScoreEstimatorEMB(self.config).to(self.device)
+        self.score_estimator = DDP(self.score_estimator, broadcast_buffers=False)
         
         self.optimizer = torch.optim.AdamW(
             self.score_estimator.parameters(),
@@ -122,7 +142,7 @@ class DiffusionRunner:
         self.optimizer.zero_grad()
         self.grad_scaler.scale(loss).backward()
         self.grad_scaler.unscale_(self.optimizer)
-        grad_norm = torch.sqrt(sum([torch.sum((t.grad).to(config.device) ** 2) for t in self.score_estimator.parameters()]))
+        grad_norm = torch.sqrt(sum([torch.sum((t.grad).to(self.device) ** 2) for t in self.score_estimator.parameters()]))
         torch.nn.utils.clip_grad_norm_(
             self.score_estimator.parameters(),
             max_norm=self.config.optim.grad_clip_norm
@@ -151,15 +171,29 @@ class DiffusionRunner:
             val_loss_score = 0
             
             for seq_tokens, msa_tokens in tqdm(self.train_loader):
-                seq_embeddings, msa_embeddings = encode(seq_tokens, msa_tokens)
+                seq_embeddings, msa_embeddings = encode(seq_tokens, msa_tokens, self.msa_encoder, self.seq_encoder, self.device)
                 
-                loss_x_0, loss_eps, loss_score = self.calc_loss(seq_embeddings.to(config.device), msa_embeddings.to(config.device))
+                loss_x_0, loss_eps, loss_score = self.calc_loss(seq_embeddings, msa_embeddings)
                 self.optimizer_step(loss_x_0)
                 
-                torch.cuda.empty_cache()
+def setup():
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ['WORLD_SIZE'])
+        print(f"RANK and WORLD_SIZE in environ: {rank}/{world_size}")
+    else:
+        rank = -1
+        world_size = -1
+
+    torch.cuda.set_device(rank)
+    torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
+    torch.distributed.barrier()
+    return rank
 
 if __name__ == "__main__":
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     config = create_config()
+    config.local_rank = setup()
     
     runner = DiffusionRunner(config)
     runner.train(10)

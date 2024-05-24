@@ -54,10 +54,10 @@ class TransformerEncoder(torch.nn.Module):
             [TransformerBlock(self.config) for i in range(0, self.num_hidden_layers // 2)]
         )
         self.time_layers = torch.nn.ModuleList(
-            [nn.Linear(self.hidden_size, self.hidden_size) for _ in range(0, self.num_hidden_layers)]
+            [nn.Linear(self.hidden_size, self.hidden_size) for i in range(0, self.num_hidden_layers)]
         )
         self.self_cond_layers = torch.nn.ModuleList(
-            [nn.Linear(self.hidden_size, self.hidden_size) for _ in range(0, self.num_hidden_layers)]
+            [nn.Linear(self.hidden_size, self.hidden_size) for i in range(0, self.num_hidden_layers)]
         )
 
     def forward(
@@ -71,35 +71,27 @@ class TransformerEncoder(torch.nn.Module):
         x_input_list = []
 
         for i, block in enumerate(self.input_blocks):
-            device = f"cuda:{i}"
             x_input_list.append(x)
-            block = block.to(device)
-            self.time_layers[i] = self.time_layers[i].to(device)
-            self.self_cond_layers[i] = self.self_cond_layers[i].to(device)
 
-            x = x.to(device) + self.time_layers[i](emb_t.to(device)) + self.self_cond_layers[i](x_0_self_cond.to(device))
+            x = x + self.time_layers[i](emb_t) + self.self_cond_layers[i](x_0_self_cond)
             
             x = block(
-                seq=query.to(device),
-                msa=x,
-                cross_attn_padding_mask=cross_attn_padding_mask.to(device) if cross_attn_padding_mask is not None else None
-            )
-
-        for i, block in enumerate(self.output_blocks):
-            ind = i + self.num_hidden_layers // 2
-            device = f"cuda:{i}"
-            block = block.to(device)
-            self.time_layers[ind] = self.time_layers[ind].to(device)
-            self.self_cond_layers[ind] = self.self_cond_layers[ind].to(device)
-            
-            x = x.to(device) + x_input_list.pop().to(device) + self.time_layers[ind](emb_t.to(device)) + self.self_cond_layers[ind](x_0_self_cond.to(device))
-            x = block(
-                seq=query.to(device),
+                seq=query,
                 msa=x,
                 cross_attn_padding_mask=cross_attn_padding_mask
             )
 
-        return x.to(self.config.device)
+        for i, block in enumerate(self.output_blocks):
+            ind = i + self.num_hidden_layers // 2
+            
+            x = x + x_input_list.pop() + self.time_layers[ind](emb_t) + self.self_cond_layers[ind](x_0_self_cond)
+            x = block(
+                seq=query,
+                msa=x,
+                cross_attn_padding_mask=cross_attn_padding_mask
+            )
+
+        return x
 
 def timestep_embedding(timesteps, dim, max_period=10000):
     """

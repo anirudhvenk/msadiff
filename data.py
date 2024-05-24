@@ -17,13 +17,9 @@ config = create_config()
 
 msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
 msa_batch_converter = msa_alphabet.get_batch_converter()
-msa_encoder.to("cuda:0")
-msa_encoder.eval()
 
 seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
 seq_batch_converter = seq_alphabet.get_batch_converter()
-seq_encoder.to("cuda:0")
-seq_encoder.eval()
 
 # This is an efficient way to delete lowercase characters and insertion characters from a string
 deletekeys = dict.fromkeys(string.ascii_lowercase)
@@ -69,24 +65,25 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
 
 def collate_fn(data):
     seqs, msas = zip(*data)
-    msas_filtered = [greedy_select(msa, num_seqs=config.data.num_rows) for msa in msas]
+    # print(len(msas))
+    msas_filtered = [greedy_select(msa, num_seqs=64) for msa in msas]
     _, _, msa_tokens = msa_batch_converter(msas_filtered)
     _, _, seq_tokens = seq_batch_converter(seqs)
     
     return seq_tokens, msa_tokens
 
-def encode(seq_tokens, msa_tokens):
+def encode(seq_tokens, msa_tokens, msa_encoder, seq_encoder, device):
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             msa_embeddings = msa_encoder(
-                msa_tokens.to("cuda:0"), 
+                msa_tokens.to(device), 
                 repr_layers=[12]
             )["representations"][12]
             seq_embeddings = seq_encoder(
-                seq_tokens.to("cuda:0"), 
+                seq_tokens.to(device), 
                 repr_layers=[6]
             )["representations"][6][:,1:,:]
-        
+            
     msa_mean = torch.mean(msa_embeddings, dim=-1).unsqueeze(-1)
     msa_std = torch.std(msa_embeddings, dim=-1).unsqueeze(-1)
     msa_embeddings_normalized = (msa_embeddings - msa_mean) / msa_std
@@ -105,7 +102,7 @@ class MSADataset(Dataset):
                     self.msas.append(greedy_select(msa, num_seqs=config.data.num_rows))
                     self.seqs.append(msa[0])
         else:
-            for filename in tqdm(os.listdir(data)[:200]):
+            for filename in tqdm(os.listdir(data)[:120]):
                 for data_dir in os.listdir(os.path.join(data, filename)):
                     msa = read_msa(os.path.join(os.path.join(data, filename), data_dir))
                     if (len(msa[0][1]) <= 256 and len(msa) >= 64):

@@ -54,12 +54,12 @@ def create_config():
     model.attention_dropout = 0.1
     model.activation_dropout = 0.1
     model.max_tokens = 2 ** 14
-    model.num_hidden_layers = 12
+    model.num_hidden_layers = 8
     model.max_position_embeddings = 512
 
     data = config.data = ml_collections.ConfigDict()
     data.num_rows = 64
-    data.batch_size = 5
+    data.batch_size = 2
     data.max_sequence_len = 256
     data.train_dataset_path = "./databases/openfold/openfold_a3m/scratch/alignments"
     data.test_dataset_path = "./databases/msa_transformer/data/a3m"
@@ -67,7 +67,7 @@ def create_config():
     config.seed = 0
     config.ddp = True
     config.use_self_cond = True
-    config.device = "cuda:6"
+    config.device = "cuda:0"
     config.world_size = 10
     config.rank = 9
 
