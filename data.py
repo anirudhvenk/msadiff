@@ -65,8 +65,7 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
 
 def collate_fn(data):
     seqs, msas = zip(*data)
-    # print(len(msas))
-    msas_filtered = [greedy_select(msa, num_seqs=64) for msa in msas]
+    msas_filtered = [greedy_select(msa, num_seqs=config.data.num_rows) for msa in msas]
     _, _, msa_tokens = msa_batch_converter(msas_filtered)
     _, _, seq_tokens = seq_batch_converter(seqs)
     
@@ -91,23 +90,16 @@ def encode(seq_tokens, msa_tokens, msa_encoder, seq_encoder, device):
     return seq_embeddings, msa_embeddings_normalized
 
 class MSADataset(Dataset):
-    def __init__(self, data, validation=False):
+    def __init__(self, data):
         self.seqs = []
         self.msas = []
         
-        if validation:
-            for filename in tqdm(os.listdir(data)):
-                msa = read_msa(os.path.join(data, filename))
-                if (len(msa[0][1]) <= 256 and len(msa) >= 64 and len(msa) <= 4096):
+        for alignment in tqdm(os.listdir(data)[:200]):
+            for alignment_data in os.listdir(os.path.join(data, alignment)):
+                msa = read_msa(os.path.join(os.path.join(data, alignment), alignment_data))
+                if (len(msa[0][1]) <= 256 and len(msa) >= config.data.num_rows):
                     self.msas.append(greedy_select(msa, num_seqs=config.data.num_rows))
                     self.seqs.append(msa[0])
-        else:
-            for filename in tqdm(os.listdir(data)[:120]):
-                for data_dir in os.listdir(os.path.join(data, filename)):
-                    msa = read_msa(os.path.join(os.path.join(data, filename), data_dir))
-                    if (len(msa[0][1]) <= 256 and len(msa) >= 64):
-                        self.msas.append(greedy_select(msa, num_seqs=config.data.num_rows))
-                        self.seqs.append(msa[0])
         
     def __len__(self):
         return len(self.msas)

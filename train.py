@@ -136,6 +136,13 @@ class DiffusionRunner:
         loss_eps = self.mse_loss(noise, eps_theta, mask=None)
         loss_score = self.mse_loss(score_clean, score, mask=None)
         
+        if (t.item() < 0.1):
+            print("t: ", t.item())  
+            print("loss_score: ", loss_score.item())
+            print("loss_eps: ", loss_eps.item())
+            print("loss_x_0: ", loss_x_0.item())
+            
+        
         return loss_x_0, loss_eps, loss_score
 
     def optimizer_step(self, loss):
@@ -175,6 +182,14 @@ class DiffusionRunner:
                 
                 loss_x_0, loss_eps, loss_score = self.calc_loss(seq_embeddings, msa_embeddings)
                 self.optimizer_step(loss_x_0)
+                
+                total_loss_x_0 += loss_x_0.detach()
+                total_loss_eps += loss_eps.detach()
+                total_loss_score += loss_score.detach()
+                
+            print(f"{self.device}, loss_x_0: ", (total_loss_x_0/len(self.train_loader)).item())
+            print(f"{self.device}, loss_eps: ", (total_loss_eps/len(self.train_loader)).item())
+            print(f"{self.device}, loss_score: ", (total_loss_score/len(self.train_loader)).item())
                 
 def setup():
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
