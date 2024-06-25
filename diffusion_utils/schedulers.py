@@ -32,7 +32,7 @@ class Cosine(Scheduler):
         return self.beta_0 + self.beta_1 * t + self.beta_2 * t ** 2 + self.beta_3 * t ** 3
 
     def alpha_std(self, t):
-        t = t[:, None, None]
+        t = t[:, None, None, None]
         log_mean_coeff = -1 / 2 * (
                 self.beta_0 * t +
                 self.beta_1 * (t ** 2) / 2 +
@@ -63,7 +63,7 @@ class CosineSD(Scheduler):
         return beta_t
 
     def alpha_std(self, t):
-        t = t[:, None, None]
+        t = t[:, None, None, None]
         tan = torch.tan(np.pi * t / 2)
         alpha_t = 1 / torch.sqrt(1 + tan ** 2 * self.d ** 2)
         std_t = torch.sqrt(1 - alpha_t ** 2)

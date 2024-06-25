@@ -3,12 +3,23 @@ import esm
 import os
 import numpy as np
 import string
-
+import pickle
 from torch.utils.data import Dataset, DataLoader
 from Bio import SeqIO
 from typing import List, Tuple
 from tqdm import tqdm
 from scipy.spatial.distance import cdist
+from config import create_config
+from transformers import EsmTokenizer, EsmModel, EsmForMaskedLM
+from esm.data import BatchConverter
+
+config = create_config()
+
+msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+msa_batch_converter = msa_alphabet.get_batch_converter()
+
+seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+seq_batch_converter = seq_alphabet.get_batch_converter()
 
 # This is an efficient way to delete lowercase characters and insertion characters from a string
 deletekeys = dict.fromkeys(string.ascii_lowercase)
@@ -52,36 +63,46 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
     indices = sorted(indices)
     return [msa[idx] for idx in indices]
 
-class MSAEncoder():
-    def __init__(self):
-        self.encoder, self.alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
-        self.encoder.cuda()
-        self.encoder.eval()
-        self.batch_converter = self.alphabet.get_batch_converter()
-        
-    def batch_encode(self, sequences):
-        _, _, tokens = self.batch_converter(sequences)
-        
-        with torch.no_grad():
-            embeddings = self.encoder(tokens.cuda(), repr_layers=[12])["representations"][12]
-        
-        return embeddings
-  
+def collate_fn(data):
+    seqs, msas = zip(*data)
+    msas_filtered = [greedy_select(msa, num_seqs=config.data.num_rows) for msa in msas]
+    _, _, msa_tokens = msa_batch_converter(msas_filtered)
+    _, _, seq_tokens = seq_batch_converter(seqs)
+    
+    return seq_tokens, msa_tokens
+
+def encode(seq_tokens, msa_tokens, msa_encoder, seq_encoder, device):
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            msa_embeddings = msa_encoder(
+                msa_tokens.to(device), 
+                repr_layers=[12]
+            )["representations"][12]
+            seq_embeddings = seq_encoder(
+                seq_tokens.to(device), 
+                repr_layers=[6]
+            )["representations"][6][:,1:,:]
+            
+    msa_mean = torch.mean(msa_embeddings, dim=-1).unsqueeze(-1)
+    msa_std = torch.std(msa_embeddings, dim=-1).unsqueeze(-1)
+    msa_embeddings_normalized = (msa_embeddings - msa_mean) / msa_std
+    
+    return seq_embeddings, msa_embeddings_normalized
 
 class MSADataset(Dataset):
-    def __init__(self, data_dir):
-        encoder = MSAEncoder()
-        self.msa_list = []
-
-        # add normalization later
-        for msa_file in tqdm(os.listdir(data_dir)):
-            msa = read_msa(os.path.join(data_dir, msa_file))
-            inputs = greedy_select(msa, num_seqs=128)
-            embeddings = encoder.batch_encode(inputs)
-            self.msa_list.append(embeddings[0])
+    def __init__(self, data):
+        self.seqs = []
+        self.msas = []
+        
+        for alignment in tqdm(os.listdir(data)[:200]):
+            for alignment_data in os.listdir(os.path.join(data, alignment)):
+                msa = read_msa(os.path.join(os.path.join(data, alignment), alignment_data))
+                if (len(msa[0][1]) <= 256 and len(msa) >= config.data.num_rows):
+                    self.msas.append(greedy_select(msa, num_seqs=config.data.num_rows))
+                    self.seqs.append(msa[0])
         
     def __len__(self):
-        return len(self.msa_list)
+        return len(self.msas)
     
     def __getitem__(self, idx):
-        return self.msa_list[idx]
+        return self.seqs[idx], self.msas[idx]
