@@ -99,7 +99,7 @@ class PMA(nn.Module):
         super(PMA, self).__init__()
         self.S = nn.Parameter(torch.Tensor(1, num_seeds, 4, dim))
         nn.init.xavier_uniform_(self.S)
-        self.mab = ColMAB(dim, dim, dim, num_heads, ln=ln)
+        self.mab = RowMAB(dim, dim, dim, num_heads, ln=ln)
 
     def forward(self, X):
         return self.mab(self.S.repeat(X.size(0), 1, 1, 1), X)
@@ -110,6 +110,6 @@ x = torch.randn(1, 5, 4, 4)
 print("Original tensor:")
 print(pma(x))
 
-x[:, [1, -1], :] = x[:, [-1, 1], :]
+x[:, [1, 3], :] = x[:, [3, 1], :]
 print("\nTensor after swapping the first and second rows of the second dimension:")
 print(pma(x))
