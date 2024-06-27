@@ -15,10 +15,10 @@ from esm.data import BatchConverter
 
 config = create_config()
 
-msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+_, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
 msa_batch_converter = msa_alphabet.get_batch_converter()
 
-seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+_, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
 seq_batch_converter = seq_alphabet.get_batch_converter()
 
 # This is an efficient way to delete lowercase characters and insertion characters from a string
@@ -71,7 +71,7 @@ def collate_fn(data):
     
     return seq_tokens, msa_tokens
 
-def encode(seq_tokens, msa_tokens, msa_encoder, seq_encoder, device):
+def encode(seq_tokens, msa_tokens, msa_encoder, seq_encoder, device, decoding=False):
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             msa_embeddings = msa_encoder(
@@ -87,14 +87,23 @@ def encode(seq_tokens, msa_tokens, msa_encoder, seq_encoder, device):
     msa_std = torch.std(msa_embeddings, dim=-1).unsqueeze(-1)
     msa_embeddings_normalized = (msa_embeddings - msa_mean) / msa_std
     
+    if decoding:
+        return msa_embeddings_normalized, msa_mean, msa_std
+    
     return seq_embeddings, msa_embeddings_normalized
 
+# def decode(msa_embeddings, decoder):
+    # with torch.no_grad():
+        # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            
+
+
 class MSADataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, num_alignments):
         self.seqs = []
         self.msas = []
         
-        for alignment in tqdm(os.listdir(data)[:200]):
+        for alignment in tqdm(os.listdir(data)[:num_alignments]):
             for alignment_data in os.listdir(os.path.join(data, alignment)):
                 msa = read_msa(os.path.join(os.path.join(data, alignment), alignment_data))
                 if (len(msa[0][1]) <= 256 and len(msa) >= config.data.num_rows):

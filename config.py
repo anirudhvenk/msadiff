@@ -54,7 +54,7 @@ def create_config():
     model.attention_dropout = 0.1
     model.activation_dropout = 0.1
     model.max_tokens = 2 ** 14
-    model.num_hidden_layers = 8
+    model.num_hidden_layers = 10
     model.max_position_embeddings = 512
 
     data = config.data = ml_collections.ConfigDict()
@@ -62,7 +62,7 @@ def create_config():
     data.batch_size = 1
     data.max_sequence_len = 256
     data.train_dataset_path = "./databases/openfold/openfold_a3m/scratch/alignments"
-    data.test_dataset_path = "./databases/msa_transformer/data/a3m"
+    data.test_dataset_path = "./databases/openfold/openfold_a3m/scratch/alignments_0"
     
     config.seed = 0
     config.ddp = True

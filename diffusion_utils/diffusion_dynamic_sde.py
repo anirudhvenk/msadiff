@@ -110,7 +110,7 @@ class DDPM_SDE:
                 ODE:
                     dx = (-1/2 * beta * x_t - 1/2 * beta * score) * dt
                 """
-                sde_params = sde_cls.sde(x_t, t)
+                sde_params = sde_cls.sde(x_t[:,1:,:,:], t)
                 drift_par, diffusion = sde_params['drift'], sde_params['diffusion']  # -1/2 * beta * x_t, sqrt(beta)
 
                 scores = sde_cls.score_fn(model, x_t, t, mask=mask, x_0_self_cond=x_0_self_cond)
@@ -137,10 +137,10 @@ class EulerDiffEqSolver:
 
     def step(self, model, x_t, t, mask=None, x_0_self_cond=None) -> Dict[str, torch.Tensor]:
         dt = -1. / self.rsde.N
-        z = torch.randn_like(x_t)
+        z = torch.randn_like(x_t[:,1:,:,:])
         rsde_params = self.rsde.sde(model, x_t, t, mask=mask, x_0_self_cond=x_0_self_cond)
         drift, diffusion = rsde_params['drift'], rsde_params['diffusion']
-        x_mean = x_t + drift * dt
+        x_mean = x_t[:,1:,:,:] + drift * dt
         if not self.ode_sampling:
             x = x_mean + diffusion[:, None, None] * np.sqrt(-dt) * z
         else:

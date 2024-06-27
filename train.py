@@ -17,14 +17,17 @@ import pickle as pkl
 from tqdm import tqdm
 from torch.cuda.amp import GradScaler
 from torchsummary import summary
+from torch.nn import functional as F
 
 class DiffusionRunner:
     def __init__(self, config):
         self.config = config
         self.device = config.local_rank
         
-        self.train_dataset = MSADataset(self.config.data.train_dataset_path)
+        self.train_dataset = MSADataset(self.config.data.train_dataset_path, 80000)
+        self.test_dataset = MSADataset(self.config.data.test_dataset_path, 10)
         print(len(self.train_dataset))
+        print(len(self.test_dataset))
         
         self.msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
         self.msa_encoder.to(self.device)
@@ -41,9 +44,24 @@ class DiffusionRunner:
             shuffle=False
         )
         
+        sampler_test = torch.utils.data.DistributedSampler(
+            self.test_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=False
+        )
+        
         self.train_loader = DataLoader(
             self.train_dataset, 
             sampler=sampler_train,
+            batch_size=self.config.data.batch_size, 
+            collate_fn=collate_fn,
+            pin_memory=False
+        )
+        
+        self.test_loader = DataLoader(
+            self.test_dataset, 
+            sampler=sampler_test,
             batch_size=self.config.data.batch_size, 
             collate_fn=collate_fn,
             pin_memory=False
@@ -67,21 +85,21 @@ class DiffusionRunner:
     def sample_time(self, batch_size: int, eps: float = 1e-5):
         return torch.FloatTensor(batch_size).uniform_() * (self.sde.T - eps) + eps
 
-    def calc_score(self, model, x_t, query, t, cross_attn_padding_mask=None, x_0_self_cond=None) -> Dict[str, torch.Tensor]:
+    def calc_score(self, model, x_t, t, mask=None, x_0_self_cond=None) -> Dict[str, torch.Tensor]:
         params = self.sde.marginal_params_tensor(x_t, t)
         x_0 = model(
             x_t=x_t, 
-            query=query, 
+            query=torch.rand((1,120,320)), 
             time_t=t, 
-            cross_attn_padding_mask=cross_attn_padding_mask, 
+            cross_attn_padding_mask=None, 
             x_0_self_cond=x_0_self_cond
         )
-        eps_theta = (x_t - params["alpha"] * x_0) / params["std"]
+        eps_theta = (x_t[:,1:,:,:] - params["alpha"] * x_0[:,1:,:,:]) / params["std"]
         score = -eps_theta / params["std"]
 
         return {
             "score": score,
-            "x_0": x_0,
+            "x_0": x_0[:,1:,:,:],
             "eps_theta": eps_theta
         }
     
@@ -100,14 +118,16 @@ class DiffusionRunner:
 
     def calc_loss(self, seq, msa):
         # Noising
-        clean_x = msa
+        clean_x = msa[:,1:,:,:]
         batch_size = clean_x.size(0)
         t = self.sample_time(batch_size).to(self.device)
         marg_forward = self.sde.marginal_forward(clean_x, t)
         x_t, noise, score_clean = marg_forward['x_t'], marg_forward['noise'], marg_forward['score']
+        x_t = torch.cat((msa[:,0].unsqueeze(1), x_t), dim=1)
 
         # self-cond estimate
         x_0_self_cond = torch.zeros_like(x_t, dtype=x_t.dtype)
+        x_0_self_cond = torch.cat((msa[:,0].unsqueeze(1), x_0_self_cond[:,1:,:,:]), dim=1)
         if random() < 0.5:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 x_0_self_cond = self.score_estimator(
@@ -123,24 +143,24 @@ class DiffusionRunner:
             scores = self.calc_score(
                 self.score_estimator,
                 x_t=x_t,
-                query=seq,
                 t=t,
-                cross_attn_padding_mask=None,
+                mask=None,
                 x_0_self_cond=x_0_self_cond
             )
 
         # MSE losses
         x_0, eps_theta, score = scores["x_0"], scores['eps_theta'], scores["score"]
 
+        # ignore the original sequence from the MSA
         loss_x_0 = self.mse_loss(clean_x, x_0, mask=None)
         loss_eps = self.mse_loss(noise, eps_theta, mask=None)
         loss_score = self.mse_loss(score_clean, score, mask=None)
         
-        if (t.item() < 0.1):
-            print("t: ", t.item())  
-            print("loss_score: ", loss_score.item())
-            print("loss_eps: ", loss_eps.item())
-            print("loss_x_0: ", loss_x_0.item())
+        # if (t.item() < 0.1 and self.device == 0):
+        #     print("t: ", t.item())  
+        #     print("loss_score: ", loss_score.item())
+        #     print("loss_eps: ", loss_eps.item())
+        #     print("loss_x_0: ", loss_x_0.item())
             
         
         return loss_x_0, loss_eps, loss_score
@@ -186,10 +206,67 @@ class DiffusionRunner:
                 total_loss_x_0 += loss_x_0.detach()
                 total_loss_eps += loss_eps.detach()
                 total_loss_score += loss_score.detach()
+                  
+            if (self.device == 0):
+                print(f"{self.device}, loss_x_0: ", (total_loss_x_0/len(self.train_loader)).item())
+                print(f"{self.device}, loss_eps: ", (total_loss_eps/len(self.train_loader)).item())
+                print(f"{self.device}, loss_score: ", (total_loss_score/len(self.train_loader)).item())
                 
-            print(f"{self.device}, loss_x_0: ", (total_loss_x_0/len(self.train_loader)).item())
-            print(f"{self.device}, loss_eps: ", (total_loss_eps/len(self.train_loader)).item())
-            print(f"{self.device}, loss_score: ", (total_loss_score/len(self.train_loader)).item())
+                for seq_tokens, msa_tokens in self.test_loader:
+                    msa_embeddings, msa_mean, msa_std = encode(
+                        seq_tokens, 
+                        msa_tokens, 
+                        self.msa_encoder,
+                        self.seq_encoder, 
+                        self.device, 
+                        decoding=True
+                    )
+                    
+                    pred_embeddings = self.pred_embeddings(msa_embeddings[:,0].unsqueeze(1), 1)
+                    pred_embeddings = pred_embeddings * msa_std + msa_mean
+                    
+                    with torch.no_grad():
+                        x = self.msa_encoder.lm_head(pred_embeddings)
+                    
+                    print(F.cross_entropy(x.view(-1, x.shape[-1]).cpu(), msa_tokens.view(-1)))
+                
+    @torch.no_grad()
+    def pred_embeddings(
+            self, seq, batch_size: int,
+            attention_mask=None,
+    ) -> torch.Tensor:
+        shape = (
+            batch_size,
+            self.config.data.num_rows,
+            seq.shape[2],
+            self.config.model.embed_dim
+        )
+
+        with torch.no_grad():
+            x = self.sde.prior_sampling(shape).to(self.device)
+            x = torch.cat((seq, x[:,1:,:,:]), dim=1)
+            x_0_self_cond = torch.zeros_like(x, dtype=x.dtype)
+            x_0_self_cond = torch.cat((seq, x_0_self_cond[:,1:,:,:]), dim=1)
+            eps_t = 0.01
+            timesteps = torch.linspace(self.sde.T, eps_t, self.sde.N, device=self.device)
+            for i in tqdm(range(self.sde.N)):
+                t = timesteps[i]
+                vec_t = torch.ones(shape[0], device=t.device) * t
+                output = self.diff_eq_solver.step(
+                    model=self.score_estimator,
+                    x_t=x, t=vec_t,
+                    mask=attention_mask,
+                    x_0_self_cond=x_0_self_cond,
+                )
+                x, x_mean = output["x"], output["x_mean"]
+                x_0_self_cond = output["x_0"]
+
+                x = torch.cat((seq, x), dim=1)
+                x_mean = torch.cat((seq, x_mean), dim=1)
+                x_0_self_cond = torch.cat((seq, x_0_self_cond), dim=1)
+            pred_embeddings = x_mean
+
+        return pred_embeddings
                 
 def setup():
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -211,4 +288,4 @@ if __name__ == "__main__":
     config.local_rank = setup()
     
     runner = DiffusionRunner(config)
-    runner.train(10)
+    runner.train(100)
