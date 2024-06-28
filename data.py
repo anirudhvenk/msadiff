@@ -15,10 +15,10 @@ from esm.data import BatchConverter
 
 config = create_config()
 
-msa_encoder, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+_, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
 msa_batch_converter = msa_alphabet.get_batch_converter()
 
-seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+_, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
 seq_batch_converter = seq_alphabet.get_batch_converter()
 
 # This is an efficient way to delete lowercase characters and insertion characters from a string

@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from typing import Optional
 from esm.modules import FeedForwardNetwork, NormalizedResidualBlock
+from esm.axial_attention import RowSelfAttention, ColumnSelfAttention
 
 class MSACrossAttention(nn.Module):
     """Computes cross-attention of 2D input with another query sequence."""
@@ -139,23 +140,39 @@ class MSATransformerLayer(nn.Module):
         self.embedding_dim = embedding_dim
         self.dropout_prob = dropout
 
-        self.msa_cross_attention = MSACrossAttention(
-            query_dim,
+        # self.msa_cross_attention = MSACrossAttention(
+        #     query_dim,
+        #     embedding_dim,
+        #     num_attention_heads,
+        #     dropout=dropout,
+        #     max_tokens_per_msa=max_tokens_per_msa,
+        # )
+        
+        row_self_attention = RowSelfAttention(
             embedding_dim,
             num_attention_heads,
             dropout=dropout,
             max_tokens_per_msa=max_tokens_per_msa,
         )
 
-        self.feed_forward_layer = FeedForwardNetwork(
+        column_self_attention = ColumnSelfAttention(
+            embedding_dim,
+            num_attention_heads,
+            dropout=dropout,
+            max_tokens_per_msa=max_tokens_per_msa,
+        )
+
+        feed_forward_layer = FeedForwardNetwork(
             embedding_dim,
             ffn_embedding_dim,
             activation_dropout=activation_dropout,
             max_tokens_per_msa=max_tokens_per_msa,
         )
 
-        self.msa_cross_attention = self.build_residual(self.msa_cross_attention)
-        self.feed_forward_layer = self.build_residual(self.feed_forward_layer)
+        # self.msa_cross_attention = self.build_residual(self.msa_cross_attention)
+        self.row_self_attention = self.build_residual(row_self_attention)
+        self.column_self_attention = self.build_residual(column_self_attention)
+        self.feed_forward_layer = self.build_residual(feed_forward_layer)
 
     def build_residual(self, layer: nn.Module):        
         return NormalizedResidualBlock(
@@ -175,10 +192,22 @@ class MSATransformerLayer(nn.Module):
         LayerNorm is applied either before or after the self-attention/ffn
         modules similar to the original Transformer implementation.
         """
-        x, attn_weights = self.msa_cross_attention(
-            x=x,
-            query=query,
-            cross_attn_padding_mask=cross_attn_padding_mask
+        # x, attn_weights = self.msa_cross_attention(
+        #     x=x,
+        #     query=query,
+        #     cross_attn_padding_mask=cross_attn_padding_mask
+        # )
+        
+        x, row_attn = self.row_self_attention(
+            x,
+            self_attn_mask=None,
+            self_attn_padding_mask=None,
+        )
+        
+        x, column_attn = self.column_self_attention(
+            x,
+            self_attn_mask=None,
+            self_attn_padding_mask=None,
         )
         
         x = self.feed_forward_layer(x)
