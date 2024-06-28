@@ -42,9 +42,9 @@ class Transition(nn.Module):
 class OuterProductMean(nn.Module):
     def __init__(
         self,
-        dim_msa=64,
-        dim_seq=320,
-        dim_hidden=32,
+        dim_msa,
+        dim_seq,
+        dim_hidden,
     ):
         super().__init__()
         self.norm = nn.LayerNorm(dim_msa)
@@ -74,11 +74,11 @@ class OuterProductMean(nn.Module):
 class PairWeightedAveraging(nn.Module):
     def __init__(
         self,
-        dim_msa=64,
-        dim_seq=320,
-        dim_head=32,
-        heads=8,
-        dropout=0.,
+        dim_msa,
+        dim_seq,
+        dim_head,
+        heads,
+        dropout,
         dropout_type="row"
     ):
         super().__init__()

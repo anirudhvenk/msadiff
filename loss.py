@@ -6,7 +6,7 @@ class ReconstructionLoss(nn.Module):
         super().__init__()
         
     def forward(self, msa_true, msa_pred):
-        return msa_true - msa_pred
+        return msa_true - msa_pred 
 
 class PermutaionMatrixPenalty(nn.Module):
     def __init__(self):

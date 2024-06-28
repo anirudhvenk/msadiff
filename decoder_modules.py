@@ -17,8 +17,8 @@ class RowSelfAttention(nn.Module):
         self,
         embed_dim,
         num_heads,
-        dropout=0.0,
-        max_tokens_per_msa: int = 2 ** 16,
+        dropout,
+        max_tokens_per_msa,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -42,7 +42,6 @@ class RowSelfAttention(nn.Module):
     def _batched_forward(
         self,
         x,
-        self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
         num_rows, num_cols, batch_size, embed_dim = x.size()
@@ -53,7 +52,6 @@ class RowSelfAttention(nn.Module):
             attn_weights = self.compute_attention_weights(
                 x[start : start + max_rows],
                 scaling,
-                self_attn_mask=self_attn_mask,
                 self_attn_padding_mask=self_attn_padding_mask[:, start : start + max_rows]
                 if self_attn_padding_mask is not None
                 else None,
@@ -73,8 +71,7 @@ class RowSelfAttention(nn.Module):
     def compute_attention_weights(
         self,
         x,
-        scaling: float,
-        self_attn_mask=None,
+        scaling,
         self_attn_padding_mask=None,
     ):
         num_rows, num_cols, batch_size, embed_dim = x.size()
@@ -87,10 +84,6 @@ class RowSelfAttention(nn.Module):
             q *= 1 - self_attn_padding_mask.permute(1, 2, 0).unsqueeze(3).unsqueeze(4).to(q)
 
         attn_weights = torch.einsum(f"rinhd,rjnhd->{self.attn_shape}", q, k)
-
-        if self_attn_mask is not None:
-            raise NotImplementedError
-            # Mask Size: [B x R x C], Weights Size: [H x B x C x C]
 
         if self_attn_padding_mask is not None:
             attn_weights = attn_weights.masked_fill(
@@ -115,7 +108,6 @@ class RowSelfAttention(nn.Module):
     def forward(
         self,
         x,
-        self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
         num_rows, num_cols, batch_size, embed_dim = x.size()
@@ -124,11 +116,11 @@ class RowSelfAttention(nn.Module):
             self_attn_padding_mask = self_attn_padding_mask.unsqueeze(1).repeat_interleave(num_rows, 1)
         
         if (num_rows * num_cols > self.max_tokens_per_msa) and not torch.is_grad_enabled():
-            return self._batched_forward(x, self_attn_mask, self_attn_padding_mask)
+            return self._batched_forward(x, self_attn_padding_mask)
         else:
             scaling = self.align_scaling(x)
             attn_weights = self.compute_attention_weights(
-                x, scaling, self_attn_mask, self_attn_padding_mask
+                x, scaling, self_attn_padding_mask
             )
             attn_probs = attn_weights.softmax(-1)
             attn_probs = self.dropout_module(attn_probs)
@@ -142,8 +134,8 @@ class ColumnSelfAttention(nn.Module):
         self,
         embed_dim,
         num_heads,
-        dropout=0.0,
-        max_tokens_per_msa: int = 2 ** 16,
+        dropout,
+        max_tokens_per_msa,
     ):
         super().__init__()
 
@@ -163,7 +155,6 @@ class ColumnSelfAttention(nn.Module):
     def _batched_forward(
         self,
         x,
-        self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
         num_rows, num_cols, batch_size, embed_dim = x.size()
@@ -173,7 +164,6 @@ class ColumnSelfAttention(nn.Module):
         for start in range(0, num_cols, max_cols):
             output, attn = self(
                 x[:, start : start + max_cols],
-                self_attn_mask=self_attn_mask,
                 self_attn_padding_mask=self_attn_padding_mask[:, :, start : start + max_cols]
                 if self_attn_padding_mask is not None
                 else None,
@@ -187,7 +177,6 @@ class ColumnSelfAttention(nn.Module):
     def compute_attention_update(
         self,
         x,
-        self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
         num_rows, num_cols, batch_size, embed_dim = x.size()
@@ -211,8 +200,6 @@ class ColumnSelfAttention(nn.Module):
 
             attn_weights = torch.einsum("icnhd,jcnhd->hcnij", q, k)
 
-            if self_attn_mask is not None:
-                raise NotImplementedError
             if self_attn_padding_mask is not None:
                 attn_weights = attn_weights.masked_fill(
                     self_attn_padding_mask.permute(2, 0, 1).unsqueeze(0).unsqueeze(3),
@@ -229,7 +216,6 @@ class ColumnSelfAttention(nn.Module):
     def forward(
         self,
         x,
-        self_attn_mask=None,
         self_attn_padding_mask=None,
     ):
         num_rows, num_cols, batch_size, embed_dim = x.size()
@@ -241,24 +227,22 @@ class ColumnSelfAttention(nn.Module):
         if (num_rows * num_cols) > self.max_tokens_per_msa and not torch.is_grad_enabled():
             return self._batched_forward(
                 x,
-                self_attn_mask,
                 self_attn_padding_mask,
             )
         else:
-            return self.compute_attention_update(x, self_attn_mask, self_attn_padding_mask)
+            return self.compute_attention_update(x, self_attn_padding_mask)
         
 class AxialTransformerLayer(nn.Module):
     """Implements an Axial MSA Transformer block."""
 
     def __init__(
         self,
-        embedding_dim: int = 768,
-        ffn_embedding_dim: int = 3072,
-        num_attention_heads: int = 8,
-        dropout: float = 0.1,
-        attention_dropout: float = 0.1,
-        activation_dropout: float = 0.1,
-        max_tokens_per_msa: int = 2**14,
+        embedding_dim,
+        ffn_embedding_dim,
+        num_attention_heads,
+        dropout,
+        activation_dropout,
+        max_tokens_per_msa
     ) -> None:
         super().__init__()
 
@@ -300,10 +284,9 @@ class AxialTransformerLayer(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        self_attn_mask: Optional[torch.Tensor] = None,
+        x,
         self_attn_padding_mask: Optional[torch.Tensor] = None,
-        need_head_weights: bool = False,
+        need_head_weights: bool = False
     ):
         """
         LayerNorm is applied either before or after the self-attention/ffn
@@ -311,12 +294,10 @@ class AxialTransformerLayer(nn.Module):
         """
         x, row_attn = self.row_self_attention(
             x,
-            self_attn_mask=self_attn_mask,
             self_attn_padding_mask=self_attn_padding_mask,
         )
         x, column_attn = self.column_self_attention(
             x,
-            self_attn_mask=self_attn_mask,
             self_attn_padding_mask=self_attn_padding_mask,
         )
         x = self.feed_forward_layer(x)

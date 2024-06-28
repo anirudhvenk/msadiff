@@ -4,46 +4,48 @@ import torch.nn as nn
 from encoder_modules import OuterProductMean, PairWeightedAveraging, Transition, PositionalEncoding
 from decoder_modules import AxialTransformerLayer, LearnedPositionalEmbedding
 
-class MSAEncoder(nn.Module):
-    def __init__(
-        self,
-        encoder_depth=4,
-        msa_dim=64,
-        seq_dim=320,
-        outer_product_mean_hidden_dim=32,
-        pair_weighted_average_hidden_dim=32,
-        pair_weighted_average_heads=8,
-        dropout=0.,
-        expansion_factor=4
-    ):
+class MSAVAE(nn.Module):
+    def __init__(self, config):
         super().__init__()
         
+        self.encoder = MSAEncoder(config)
+        self.decoder = MSADecoder(config)
+        self.permuter = Permuter(config)
+        
+    def forward(self, seq, msa, mask=None):
+        z, mu, logvar, msa = self.encoder(seq, msa, mask)
+        perm = self.permuter(msa.flatten(-2))
+        msa = self.decoder(z, perm, mask)
+        
+        return msa
+
+class MSAEncoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        
+        self.embed_tokens = nn.Embedding(
+            config.data.alphabet_size, config.model.encoder_msa_dim, config.data.padding_idx
+        )
+        
         self.layers = nn.ModuleList([])
-        for _ in range(encoder_depth):
+        for _ in range(config.model.encoder_depth):
             outer_product_mean = OuterProductMean(
-                dim_msa=msa_dim,
-                dim_seq=seq_dim,
-                dim_hidden=outer_product_mean_hidden_dim
+                dim_msa=config.model.encoder_msa_dim,
+                dim_seq=config.model.seq_dim,
+                dim_hidden=config.model.encoder_outer_prod_mean_hidden
             )
             
             pair_weighted_averaging = PairWeightedAveraging(
-                dim_msa=msa_dim,
-                dim_seq=seq_dim,
-                dim_head=pair_weighted_average_hidden_dim,
-                heads=pair_weighted_average_heads,
-                dropout=dropout,
+                dim_msa=config.model.encoder_msa_dim,
+                dim_seq=config.model.seq_dim,
+                dim_head=config.model.encoder_pair_weighted_avg_hidden,
+                heads=config.model.encoder_pair_weighted_avg_heads,
+                dropout=config.model.encoder_dropout,
                 dropout_type="row"
             )
             
-            msa_transition = Transition(
-                dim=msa_dim,
-                expansion_factor=expansion_factor
-            )
-            
-            seq_transition = Transition(
-                dim=seq_dim,
-                expansion_factor=expansion_factor
-            )
+            msa_transition = Transition(dim=config.model.encoder_msa_dim)
+            seq_transition = Transition(dim=config.model.seq_dim)
             
             self.layers.append(nn.ModuleList([
                 outer_product_mean,
@@ -52,7 +54,7 @@ class MSAEncoder(nn.Module):
                 seq_transition
             ]))
             
-        self.encode_w = nn.Linear(seq_dim, 2 * seq_dim)
+        self.encode_z = nn.Linear(config.model.seq_dim, config.model.seq_dim)
     
     def forward(
         self,
@@ -60,10 +62,8 @@ class MSAEncoder(nn.Module):
         msa,
         mask=None
     ):
-        # TODO sampling (maybe?) and initial projection
-        # also have to add positional embeddings to the sequence
-        
-        msa = self.msa_init_proj(msa)
+        # TODO sampling (maybe?)
+        msa = self.embed_tokens(msa)
         
         for (
             outer_product_mean,
@@ -76,19 +76,88 @@ class MSAEncoder(nn.Module):
             msa += msa_transition(msa)
             seq += seq_transition(seq)
             
-        z = self.encode_w(torch.relu(seq))
+        z = self.encode_z(torch.relu(seq))
         mu = z[:,:,:seq.size(-1)]
         logvar = z[:,:,seq.size(-1):]
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
-        z = mu + eps * std
+        print(z)
+        # print(z.shape)
+        # z = mu + eps * std
+        # print(z.shape)
         
-        return msa, z, mu, logvar
-    
-class Permuter(nn.Module):
-    def __init__(self, input_dim):
+        return z, mu, logvar, msa
+
+class MSADecoder(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.scoring_fc = nn.Linear(input_dim, 1)
+        
+        self.max_sequence_len = config.data.max_sequence_len
+        self.msa_depth = config.data.msa_depth
+        
+        self.positional_embedding = PositionalEncoding(config.model.decoder_pos_emb_dim)
+        self.decode_z = nn.Linear(
+            config.model.seq_dim+config.model.decoder_pos_emb_dim, 
+            config.model.decoder_msa_dim
+        )
+
+        self.embed_positions = LearnedPositionalEmbedding(
+            config.model.decoder_max_pos,
+            config.model.decoder_msa_dim,
+            config.data.padding_idx
+        )
+        
+        self.before_norm = nn.LayerNorm(config.model.decoder_msa_dim)
+        self.layers = nn.ModuleList(
+            [
+                AxialTransformerLayer(
+                    config.model.decoder_msa_dim,
+                    config.model.decoder_ffn_hidden,
+                    config.model.decoder_num_heads,
+                    config.model.decoder_dropout,
+                    config.model.decoder_activation_dropout,
+                    max_tokens_per_msa=2**14,
+                )
+                for _ in range(config.model.decoder_depth)
+            ]
+        )
+        self.after_norm = nn.LayerNorm(config.model.decoder_msa_dim)
+        self.to_logits = nn.Linear(config.model.decoder_msa_dim, config.data.alphabet_size)
+        
+    def init_message_matrix(self, z, perm):
+        batch_size = z.size(0)
+
+        pos_emb = self.positional_embedding(batch_size, self.msa_depth)
+        pos_emb = torch.matmul(perm, pos_emb).unsqueeze(2).repeat_interleave(self.max_sequence_len, 2)
+
+        x = z.unsqueeze(1).expand(-1, self.msa_depth, -1, -1)
+        x = torch.cat((x, pos_emb), dim=-1)
+        x = self.decode_z(x)
+        
+        return x
+    
+    def forward(self, z, perm, mask=None):
+        x = self.init_message_matrix(z, perm)
+        x = self.before_norm(x)
+        x = x.permute(1, 2, 0, 3)
+                
+        for layer in self.layers:
+            x = layer(
+                x,
+                self_attn_padding_mask=mask
+            )
+        
+        x = self.after_norm(x)
+        x = x.permute(2, 0, 1, 3)
+        # print(self.to_logits(x))
+        # x = torch.softmax(nn.GELU()(self.to_logits(x)), -1)
+        
+        # return x
+
+class Permuter(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.scoring_fc = nn.Linear(config.data.max_sequence_len*config.model.encoder_msa_dim, 1)
 
     def score(self, x, mask=None):
         scores = self.scoring_fc(x)
@@ -118,120 +187,3 @@ class Permuter(nn.Module):
         perm = self.soft_sort(scores, hard, tau)
         perm = perm.transpose(2, 1)
         return perm
-
-class MSADecoder(nn.Module):
-    def __init__(
-        self,
-        seq_dim=320,
-        decoder_pos_emb_dim=2,
-        decoder_emb_dim=64,
-        msa_depth=3,
-        max_positions=512,
-        decoder_depth=4,
-        ffn_embed_dim=3072,
-        num_heads=1,
-        dropout=0.,
-        attention_dropout=0.,
-        activation_dropout=0.,
-        max_tokens=2**14
-    ):
-        super().__init__()
-        
-        self.msa_depth = msa_depth
-        self.positional_embedding = PositionalEncoding(decoder_pos_emb_dim)
-        self.decode_w = nn.Linear(seq_dim+decoder_pos_emb_dim, decoder_emb_dim)
-        
-        self.embed_positions = LearnedPositionalEmbedding(
-            max_positions,
-            decoder_emb_dim,
-            1
-        )
-        
-        self.before_norm = nn.LayerNorm(decoder_emb_dim)
-        self.layers = nn.ModuleList(
-            [
-                AxialTransformerLayer(
-                    decoder_emb_dim,
-                    ffn_embed_dim,
-                    num_heads,
-                    dropout,
-                    attention_dropout,
-                    activation_dropout,
-                    max_tokens,
-                )
-                for _ in range(decoder_depth)
-            ]
-        )
-        self.after_norm = nn.LayerNorm(decoder_emb_dim)
-        
-        # TODO
-        # self.lm_head = RobertaLMHead(
-        #     embed_dim=self.args.embed_dim,
-        #     output_dim=self.alphabet_size,
-        #     weight=self.embed_tokens.weight,
-        # )
-        
-    def init_message_matrix(self, z, perm):
-        batch_size = z.size(0)
-
-        pos_emb = self.positional_embedding(batch_size, self.msa_depth)
-        pos_emb = torch.matmul(perm, pos_emb).unsqueeze(2).repeat_interleave(5, 2)
-
-        x = z.unsqueeze(1).expand(-1, self.msa_depth, -1, -1)
-        x = torch.cat((x, pos_emb), dim=-1)
-        x = self.decode_w(x)
-        
-        return x
-    
-    def forward(self, z, perm, mask):
-        x = self.init_message_matrix(z, perm, mask)
-        x = self.before_norm(x)
-        x = x.permute(1, 2, 0, 3)
-                
-        for layer in self.layers:
-            x = layer(
-                x,
-                self_attn_padding_mask=mask
-            )
-            
-        x = self.after_norm(x)
-        
-        return x
-    
-torch.manual_seed(42)    
-
-msa_encoder = MSAEncoder(
-    msa_dim=4,
-    seq_dim=2,
-    outer_product_mean_hidden_dim=32,
-    pair_weighted_average_hidden_dim=32,
-    pair_weighted_average_heads=8
-)
-permuter = Permuter(5*4)
-decoder = MSADecoder(
-    seq_dim=2,
-    decoder_emb_dim=4,
-    decoder_pos_emb_dim=2
-)
-
-
-seq = torch.randn((1,3,2))
-msa = torch.randn((1,3,3,4))
-
-padded_msa = nn.functional.pad(msa, (0,0,0,2))
-padded_seq = nn.functional.pad(seq, (0,0,0,2))
-padding_mask = torch.ones((1,5),dtype=torch.bool)
-padding_mask[...,3:] = False
-print(padding_mask.shape)
-# attn_padding_mask = padding_mask.unsqueeze(0).repeat_interleave(3, 1)
-
-msa, z, mu, logvar = msa_encoder(padded_seq, padded_msa, padding_mask)
-perm = permuter(msa.flatten(-2))
-print(decoder(z, perm, padding_mask))
-
-# print(z)
-# print(m.flatten(-2))
-# print(linear1(m.flatten(-2)))
-
-# m,s = msa_encoder(seq, msa)
-# print(linear2(m.flatten(-2)))
