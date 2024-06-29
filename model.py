@@ -198,40 +198,40 @@ class MSADecoder(nn.Module):
         
         return x
     
-torch.manual_seed(42)    
+# torch.manual_seed(42)    
 
-msa_encoder = MSAEncoder(
-    msa_dim=4,
-    seq_dim=2,
-    outer_product_mean_hidden_dim=32,
-    pair_weighted_average_hidden_dim=32,
-    pair_weighted_average_heads=8
-)
-permuter = Permuter(5*4)
-decoder = MSADecoder(
-    seq_dim=2,
-    decoder_emb_dim=4,
-    decoder_pos_emb_dim=2
-)
+# msa_encoder = MSAEncoder(
+#     msa_dim=4,
+#     seq_dim=2,
+#     outer_product_mean_hidden_dim=32,
+#     pair_weighted_average_hidden_dim=32,
+#     pair_weighted_average_heads=8
+# )
+# permuter = Permuter(5*4)
+# decoder = MSADecoder(
+#     seq_dim=2,
+#     decoder_emb_dim=4,
+#     decoder_pos_emb_dim=2
+# )
 
 
-seq = torch.randn((1,3,2))
-msa = torch.randn((1,3,3,4))
+# seq = torch.randn((1,3,2))
+# msa = torch.randn((1,3,3,4))
 
-padded_msa = nn.functional.pad(msa, (0,0,0,2))
-padded_seq = nn.functional.pad(seq, (0,0,0,2))
-padding_mask = torch.ones((1,5),dtype=torch.bool)
-padding_mask[...,3:] = False
-print(padding_mask.shape)
-# attn_padding_mask = padding_mask.unsqueeze(0).repeat_interleave(3, 1)
+# padded_msa = nn.functional.pad(msa, (0,0,0,2))
+# padded_seq = nn.functional.pad(seq, (0,0,0,2))
+# padding_mask = torch.ones((1,5),dtype=torch.bool)
+# padding_mask[...,3:] = False
+# print(padding_mask.shape)
+# # attn_padding_mask = padding_mask.unsqueeze(0).repeat_interleave(3, 1)
 
-msa, z, mu, logvar = msa_encoder(padded_seq, padded_msa, padding_mask)
-perm = permuter(msa.flatten(-2))
-print(decoder(z, perm, padding_mask))
+# msa, z, mu, logvar = msa_encoder(padded_seq, padded_msa, padding_mask)
+# perm = permuter(msa.flatten(-2))
+# print(decoder(z, perm, padding_mask))
 
-# print(z)
-# print(m.flatten(-2))
-# print(linear1(m.flatten(-2)))
+# # print(z)
+# # print(m.flatten(-2))
+# # print(linear1(m.flatten(-2)))
 
-# m,s = msa_encoder(seq, msa)
-# print(linear2(m.flatten(-2)))
+# # m,s = msa_encoder(seq, msa)
+# # print(linear2(m.flatten(-2)))
