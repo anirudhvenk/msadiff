@@ -1,77 +1,79 @@
 import torch
-<<<<<<< HEAD
-from transformers import EsmTokenizer, EsmModel, EsmForMaskedLM
-from typing import Optional
-
-tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
-encoder = EsmModel.from_pretrained("facebook/esm2_t6_8M_UR50D", add_cross_attention=False, is_decoder=False)
-
-sequences = ["ATGY"]
-
-
-tokenized = tokenizer(
-    sequences, 
-    return_attention_mask=True, 
-    return_tensors="pt", 
-    truncation=True, 
-    padding=True, 
-    max_length=256
-)
-
-with torch.no_grad():
-    embeddings = encoder(**tokenized).last_hidden_state
-
-print(embeddings.shape)
-=======
 import esm
 import torch.nn.functional as F
 
-from model import MSAVAE, MSAEncoder
-from data import read_msa, greedy_select
+from model import MSAVAE, MSAEncoder, MSADecoder
+from loss import Critic
+from torch.utils.data import DataLoader
+from data import read_msa, greedy_select, MSADataset
 from config import create_config
-from transformers import EsmTokenizer, EsmModel, EsmForMaskedLM
+from tqdm import tqdm
 
 config = create_config()
-msavae = MSAVAE(config)
 
 torch.manual_seed(42)
+torch.autograd.set_detect_anomaly(True)
 
-seq_tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
-seq_encoder = EsmModel.from_pretrained("facebook/esm2_t6_8M_UR50D", add_cross_attention=False, is_decoder=False)
+_, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+msa_batch_converter = msa_alphabet.get_batch_converter()
 
-msa_transformer, msa_transformer_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
-msa_transformer_batch_converter = msa_transformer_alphabet.get_batch_converter()
-print(len(msa_transformer_alphabet.all_toks))
+seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+seq_encoder.to(config.device)
+seq_batch_converter = seq_alphabet.get_batch_converter()
 
-msa = read_msa("databases/data/a3m/1vgj_1_A.a3m")
-msa = greedy_select(msa, num_seqs=config.data.msa_depth)
-_, _, msa_tokens = msa_transformer_batch_converter(msa)
-msa_tokens = msa_tokens[:,:,1:]
-msa_tokens = F.pad(msa_tokens, (0, 256-msa_tokens.size(-1)), "constant", config.data.padding_idx)
-perm_indices = torch.randperm(msa_tokens.size(1))
-permuted_msa_tokens = msa_tokens[:, perm_indices, :]
+def collate_fn(data):
+    seqs, msas = zip(*data)
+    _, _, msa_tokens = msa_batch_converter(msas)
+    _, _, seq_tokens = seq_batch_converter(seqs)
+    seq_batch_lens = (seq_tokens != seq_alphabet.padding_idx).sum(1)
+    
+    with torch.no_grad():
+        raw_seq_embeddings = seq_encoder(seq_tokens, repr_layers=[6])["representations"][6]
+    
+    seq_embeddings = []
+    mask = torch.ones(seq_tokens.size(0), config.data.max_sequence_len, dtype=torch.bool)
+    for i, tokens_len in enumerate(seq_batch_lens):
+        seq_repr = raw_seq_embeddings[i, 1 : tokens_len - 1]
+        mask[i, : seq_repr.size(0)] = False
+        seq_repr = F.pad(
+            seq_repr, 
+            (0, 0, 0, config.data.max_sequence_len - seq_repr.size(0)), 
+            "constant", 
+            seq_alphabet.padding_idx
+        )
+        seq_embeddings.append(seq_repr)
+    seq_embeddings = torch.stack(seq_embeddings)
+    
+    msa_tokens = msa_tokens[:,:,1:]
+    msa_tokens = F.pad(
+        msa_tokens,
+        (0, config.data.max_sequence_len - msa_tokens.size(-1)),
+        "constant",
+        msa_alphabet.padding_idx
+    )
+    
+    return seq_embeddings, msa_tokens, mask
 
-sequences = ["ATGY"]
-seq_tokens = seq_tokenizer(
-    sequences,
-    return_attention_mask=True, 
-    return_tensors="pt", 
-    truncation=True,
-    padding="max_length", 
-    max_length=256+2
-)
-with torch.no_grad():
-    encoded_seq = seq_encoder(**seq_tokens).last_hidden_state
-encoded_seq = encoded_seq[:,1:-1,:]
-permuted_encoded_seq = encoded_seq.clone()
+train_dataset = MSADataset(config)
+train_dataloader = DataLoader(train_dataset, collate_fn=collate_fn, batch_size=config.data.batch_size)
 
-mask = seq_tokens["attention_mask"]
-indices_to_remove = [0, 5]
-rm_mask = torch.ones(mask.shape[1], dtype=torch.bool)
-rm_mask[indices_to_remove] = False
-mask = mask[:, rm_mask].bool()
-
+msavae = MSAVAE(config).to(config.device)
 msaencoder = MSAEncoder(config)
-msavae(encoded_seq, msa_tokens, mask)
-msavae(permuted_encoded_seq, permuted_msa_tokens, mask)
->>>>>>> f699727a7385af273b541e0138e1dd45cace2598
+msadecoder = MSADecoder(config)
+loss = Critic(config)
+optimizer = torch.optim.Adam(msavae.parameters())
+
+print("encoder: ", sum(p.numel() for p in msaencoder.parameters() if p.requires_grad))
+print("decoder: ", sum(p.numel() for p in msadecoder.parameters() if p.requires_grad))
+
+for e in range(20):
+    for seq_embeddings, msa_tokens, mask in tqdm(train_dataloader):
+        optimizer.zero_grad()
+        
+        pred_msa, perm, mu, logvar = msavae(seq_embeddings, msa_tokens, mask)
+        loss_dict = loss(msa_tokens, pred_msa, mask, perm, mu, logvar)
+        
+        loss_dict["loss"].backward()
+        optimizer.step()
+        
+        print(loss_dict)

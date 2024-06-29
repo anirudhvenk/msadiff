@@ -17,7 +17,7 @@ class MSAVAE(nn.Module):
         perm = self.permuter(msa.flatten(-2))
         msa = self.decoder(z, perm, mask)
         
-        return msa
+        return msa, perm, mu, logvar
 
 class MSAEncoder(nn.Module):
     def __init__(self, config):
@@ -54,7 +54,7 @@ class MSAEncoder(nn.Module):
                 seq_transition
             ]))
             
-        self.encode_z = nn.Linear(config.model.seq_dim, config.model.seq_dim)
+        self.encode_z = nn.Linear(config.model.seq_dim, 2 * config.model.seq_dim)
     
     def forward(
         self,
@@ -71,20 +71,17 @@ class MSAEncoder(nn.Module):
             msa_transition,
             seq_transition
         ) in self.layers:
-            seq += outer_product_mean(msa, mask)
-            msa += pair_weighted_averaging(msa, seq, mask)
-            msa += msa_transition(msa)
-            seq += seq_transition(seq)
+            seq = outer_product_mean(msa, mask) + seq
+            msa = pair_weighted_averaging(msa, seq, mask) + msa
+            msa = msa_transition(msa) + msa
+            seq = seq_transition(seq) + seq
             
         z = self.encode_z(torch.relu(seq))
         mu = z[:,:,:seq.size(-1)]
         logvar = z[:,:,seq.size(-1):]
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
-        print(z)
-        # print(z.shape)
-        # z = mu + eps * std
-        # print(z.shape)
+        z = mu + eps * std
         
         return z, mu, logvar, msa
 
@@ -94,6 +91,7 @@ class MSADecoder(nn.Module):
         
         self.max_sequence_len = config.data.max_sequence_len
         self.msa_depth = config.data.msa_depth
+        self.alphabet_size = config.data.alphabet_size
         
         self.positional_embedding = PositionalEncoding(config.model.decoder_pos_emb_dim)
         self.decode_z = nn.Linear(
@@ -149,10 +147,9 @@ class MSADecoder(nn.Module):
         
         x = self.after_norm(x)
         x = x.permute(2, 0, 1, 3)
-        # print(self.to_logits(x))
-        # x = torch.softmax(nn.GELU()(self.to_logits(x)), -1)
+        x = self.to_logits(nn.GELU()(x))
         
-        # return x
+        return x
 
 class Permuter(nn.Module):
     def __init__(self, config):

@@ -1,12 +1,54 @@
 import torch
 import torch.nn as nn
 
+class Critic(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.alpha = config.loss.kld_loss_scale
+        self.beta = config.loss.perm_loss_scale
+        self.msa_depth = config.data.msa_depth
+        
+        self.reconstruction_loss = ReconstructionLoss()
+        self.perm_loss = PermutaionMatrixPenalty()
+        self.kld_loss = KLDLoss()
+        
+    def forward(self, msa_true, msa_pred, mask, perm, mu, logvar):
+        recon_loss, ppl = self.reconstruction_loss(
+            msa_true,
+            msa_pred,
+            mask,
+            self.msa_depth
+        )
+        perm_loss = self.perm_loss(perm)
+        kld_loss = self.kld_loss(mu, logvar)
+        total_loss = recon_loss + self.alpha * kld_loss + self.beta * kld_loss
+        
+        loss_dict = {
+            "loss": total_loss,
+            "recon_loss": recon_loss,
+            "perm_loss": perm_loss,
+            "kld_loss": kld_loss,
+            "ppl": ppl
+        }
+        
+        return loss_dict
+
 class ReconstructionLoss(nn.Module):
     def __init__(self):
         super().__init__()
         
-    def forward(self, msa_true, msa_pred):
-        return msa_true - msa_pred 
+    def forward(self, msa_true, msa_pred, mask, msa_depth):
+        mask_expanded = mask.unsqueeze(1)
+        mask_expanded = mask_expanded.expand(-1, msa_depth, -1)
+        
+        msa_true = msa_true[~mask_expanded]
+        msa_pred = msa_pred[~mask_expanded.unsqueeze(-1).expand(-1, -1, -1, 33)].view(-1, 33)
+
+        loss = nn.CrossEntropyLoss(reduction="none")(msa_pred, msa_true)
+        perplexity = loss.float().exp().mean()
+        loss = loss.mean()
+        
+        return loss, perplexity
 
 class PermutaionMatrixPenalty(nn.Module):
     def __init__(self):

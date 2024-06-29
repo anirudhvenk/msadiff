@@ -4,6 +4,7 @@ import os
 import numpy as np
 import string
 import pickle
+
 from torch.utils.data import Dataset, DataLoader
 from Bio import SeqIO
 from typing import List, Tuple
@@ -62,3 +63,21 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
         indices.append(index)
     indices = sorted(indices)
     return [msa[idx] for idx in indices]
+
+class MSADataset(Dataset):
+    def __init__(self, config):
+        self.seqs = []
+        self.msas = []
+        
+        for filename in tqdm(os.listdir(config.data.train_dataset_path)[:10]):
+            msa = read_msa(os.path.join(config.data.train_dataset_path, filename))
+            if (len(msa[0][1]) <= config.data.max_sequence_len):
+                msa_filtered = greedy_select(msa, config.data.msa_depth+1)
+                self.msas.append(msa_filtered[1:])
+                self.seqs.append(msa[0])
+        
+    def __len__(self):
+        return len(self.msas)
+    
+    def __getitem__(self, idx):
+        return self.seqs[idx], self.msas[idx]
