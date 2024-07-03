@@ -14,14 +14,6 @@ from config import create_config
 from transformers import EsmTokenizer, EsmModel, EsmForMaskedLM
 from esm.data import BatchConverter
 
-config = create_config()
-
-_, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
-msa_batch_converter = msa_alphabet.get_batch_converter()
-
-_, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
-seq_batch_converter = seq_alphabet.get_batch_converter()
-
 # This is an efficient way to delete lowercase characters and insertion characters from a string
 deletekeys = dict.fromkeys(string.ascii_lowercase)
 deletekeys["."] = None
@@ -69,9 +61,9 @@ class MSADataset(Dataset):
         self.seqs = []
         self.msas = []
         
-        for filename in tqdm(os.listdir(config.data.train_dataset_path)[:10]):
+        for filename in tqdm(os.listdir(config.data.train_dataset_path)):
             msa = read_msa(os.path.join(config.data.train_dataset_path, filename))
-            if (len(msa[0][1]) <= config.data.max_sequence_len):
+            if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth):
                 msa_filtered = greedy_select(msa, config.data.msa_depth+1)
                 self.msas.append(msa_filtered[1:])
                 self.seqs.append(msa[0])

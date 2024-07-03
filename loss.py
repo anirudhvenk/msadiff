@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 
-class Critic(nn.Module):
+class Criterion(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.alpha = config.loss.kld_loss_scale
-        self.beta = config.loss.perm_loss_scale
+        self.beta = config.loss.kld_loss_scale
+        self.alpha = config.loss.perm_loss_scale
         self.msa_depth = config.data.msa_depth
         
         self.reconstruction_loss = ReconstructionLoss()
@@ -21,7 +21,7 @@ class Critic(nn.Module):
         )
         perm_loss = self.perm_loss(perm)
         kld_loss = self.kld_loss(mu, logvar)
-        total_loss = recon_loss + self.alpha * kld_loss + self.beta * kld_loss
+        total_loss = recon_loss + self.alpha * perm_loss + self.beta * kld_loss
         
         loss_dict = {
             "loss": total_loss,

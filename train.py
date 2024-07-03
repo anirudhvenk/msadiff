@@ -1,5 +1,5 @@
-from model import MSAScoreEstimatorEMB
-from data import MSADataset, collate_fn, encode
+# from model import MSAScoreEstimatorEMB
+# from data import MSADataset, collate_fn, encode
 from torch.utils.data import DataLoader
 from diffusion_utils.diffusion_dynamic_sde import create_sde, create_solver
 from torch.utils.data.distributed import DistributedSampler
@@ -286,6 +286,7 @@ if __name__ == "__main__":
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     config = create_config()
     config.local_rank = setup()
+    print("setup!")
     
-    runner = DiffusionRunner(config)
-    runner.train(100)
+    # runner = DiffusionRunner(config)
+    # runner.train(100)
