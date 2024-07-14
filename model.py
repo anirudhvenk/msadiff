@@ -2,20 +2,20 @@ import torch
 import torch.nn as nn
 
 from encoder_modules import OuterProductMean, PairWeightedAveraging, Transition, PositionalEncoding
-from decoder_modules import AxialTransformerLayer, LearnedPositionalEmbedding
+from decoder_modules import AxialTransformerLayer, LearnedPositionalEmbedding, RobertaLMHead
 
 class MSAVAE(nn.Module):
     def __init__(self, config):
         super().__init__()
         
         self.encoder = MSAEncoder(config)
-        self.decoder = MSADecoder(config)
+        self.decoder = MSADecoder(config, self.encoder.embed_tokens.weight)
         self.permuter = Permuter(config)
         
     def forward(self, seq, msa, mask=None):
         z, mu, logvar, msa = self.encoder(seq, msa, mask)
         perm = self.permuter(msa.flatten(-2))
-        msa = self.decoder(z, perm, mask)
+        msa = self.decoder(z=z, perm=perm, mask=mask)
         
         return msa, perm, mu, logvar
 
@@ -86,7 +86,7 @@ class MSAEncoder(nn.Module):
         return z, mu, logvar, msa
 
 class MSADecoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, embed_tokens_weight):
         super().__init__()
         
         self.max_sequence_len = config.data.max_sequence_len
@@ -98,12 +98,9 @@ class MSADecoder(nn.Module):
             config.model.seq_dim+config.model.decoder_pos_emb_dim, 
             config.model.decoder_msa_dim
         )
-
-        self.embed_positions = LearnedPositionalEmbedding(
-            config.model.decoder_max_pos,
-            config.model.decoder_msa_dim,
-            config.data.padding_idx
-        )
+        
+        self.register_buffer("position_ids", torch.arange(self.max_sequence_len).expand((1,self.msa_depth,-1)))
+        self.position_embeddings = torch.nn.Embedding(self.max_sequence_len, config.model.decoder_msa_dim)
         
         self.before_norm = nn.LayerNorm(config.model.decoder_msa_dim)
         self.layers = nn.ModuleList(
@@ -136,6 +133,8 @@ class MSADecoder(nn.Module):
     
     def forward(self, z, perm, mask=None):
         x = self.init_message_matrix(z, perm)
+        x += self.position_embeddings(self.position_ids)
+        
         x = self.before_norm(x)
         x = x.permute(1, 2, 0, 3)
                 

@@ -18,14 +18,14 @@ def create_config():
     model = config.model = ml_collections.ConfigDict()
     model.seq_dim = 320
     
-    model.encoder_depth = 8
-    model.encoder_msa_dim = 256
+    model.encoder_depth = 4
+    model.encoder_msa_dim = 512
     model.encoder_outer_prod_mean_hidden = 128
     model.encoder_pair_weighted_avg_hidden = 128
     model.encoder_pair_weighted_avg_heads = 8
     model.encoder_dropout = 0.1
     
-    model.decoder_depth = 12
+    model.decoder_depth = 6
     model.decoder_pos_emb_dim = 64
     model.decoder_msa_dim = 512
     model.decoder_max_pos = 1024
@@ -39,7 +39,7 @@ def create_config():
     data.alphabet_size = 33
     data.padding_idx = 1
     data.msa_depth = 32
-    data.batch_size = 2
+    data.batch_size = 1
     data.max_sequence_len = 256
     data.train_dataset_path = "./databases/openfold/flattened"
     data.test_dataset_path = "./databases/msa_transformer/data/a3m"

@@ -10,6 +10,15 @@ import torch.nn.functional as F
 
 from typing import Optional
 
+def gelu(x):
+    """Implementation of the gelu activation function.
+
+    For information: OpenAI GPT's gelu is slightly different
+    (and gives slightly different results):
+    0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+    """
+    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+
 class RowSelfAttention(nn.Module):
     """Compute self-attention over rows of a 2D input."""
 
@@ -113,7 +122,7 @@ class RowSelfAttention(nn.Module):
         num_rows, num_cols, batch_size, embed_dim = x.size()
         
         if self_attn_padding_mask is not None:
-            self_attn_padding_mask = self_attn_padding_mask.unsqueeze(1).repeat_interleave(num_rows, 1)
+            self_attn_padding_mask = self_attn_padding_mask.unsqueeze(1).expand(-1, num_rows, -1)
         
         if (num_rows * num_cols > self.max_tokens_per_msa) and not torch.is_grad_enabled():
             return self._batched_forward(x, self_attn_padding_mask)
@@ -221,7 +230,7 @@ class ColumnSelfAttention(nn.Module):
         num_rows, num_cols, batch_size, embed_dim = x.size()
         
         if self_attn_padding_mask is not None:
-            self_attn_padding_mask = self_attn_padding_mask.unsqueeze(1).repeat_interleave(num_rows, 1)
+            self_attn_padding_mask = self_attn_padding_mask.unsqueeze(1).expand(-1, num_rows, -1)
         
         # if False and num_rows * num_cols > 2 ** 14 and not torch.is_grad_enabled():
         if (num_rows * num_cols) > self.max_tokens_per_msa and not torch.is_grad_enabled():
@@ -399,3 +408,21 @@ class LearnedPositionalEmbedding(nn.Embedding):
             self.scale_grad_by_freq,
             self.sparse,
         )
+        
+class RobertaLMHead(nn.Module):
+    """Head for masked language modeling."""
+
+    def __init__(self, embed_dim, output_dim, weight):
+        super().__init__()
+        self.dense = nn.Linear(embed_dim, embed_dim)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+        self.weight = weight
+        self.bias = nn.Parameter(torch.zeros(output_dim))
+
+    def forward(self, features):
+        x = self.dense(features)
+        x = gelu(x)
+        x = self.layer_norm(x)
+        # project back to size of vocabulary with bias
+        x = F.linear(x, self.weight) + self.bias
+        return x

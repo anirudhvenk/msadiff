@@ -34,6 +34,9 @@ class VAERunner():
     def __init__(self, config):
         self.config = config
 
+        # if dist.get_rank() == 0:
+        #     wandb.init(project="msadiff", config=config.to_dict())
+
         _, self.msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
         self.msa_batch_converter = self.msa_alphabet.get_batch_converter()
 
@@ -63,12 +66,14 @@ class VAERunner():
             pin_memory=False
         )
         
-        if dist.get_rank() == 0:
-            wandb.init(project="msadiff", config=config.to_dict())
-        
     def collate_fn(self, data):
         seqs, msas = zip(*data)
-        _, _, msa_tokens = self.msa_batch_converter(msas)
+        # print(len(seqs[0][1]))
+        filtered_msas = []
+        for msa in msas:
+            filtered_msas.append(greedy_select(msa, config.data.msa_depth))
+        
+        _, _, msa_tokens = self.msa_batch_converter(filtered_msas)
         _, _, seq_tokens = self.seq_batch_converter(seqs)
         seq_batch_lens = (seq_tokens != self.seq_alphabet.padding_idx).sum(1)
         
@@ -129,15 +134,27 @@ class VAERunner():
                 kld_loss += loss_dict["kld_loss"].detach()
                 ppl += loss_dict["ppl"].detach()
                 
+                # for name, param in self.model.named_parameters():
+                #     if param.grad is None:
+                #         print(name)
             if dist.get_rank() == 0:
-                wandb.log({
-                    "epoch": e,
-                    "total_loss": total_loss.item()/len(self.train_loader),
-                    "recon_loss": recon_loss.item()/len(self.train_loader),
-                    "perm_loss": perm_loss.item()/len(self.train_loader),
-                    "kld_loss": kld_loss.item()/len(self.train_loader),
-                    "perplexity": ppl.item()/len(self.train_loader)
-                })
+                print({
+                            "epoch": e,
+                            "total_loss": total_loss.item()/len(self.train_loader),
+                            "recon_loss": recon_loss.item()/len(self.train_loader),
+                            "perm_loss": perm_loss.item()/len(self.train_loader),
+                            "kld_loss": kld_loss.item()/len(self.train_loader),
+                            "perplexity": ppl.item()/len(self.train_loader)
+                        })                
+            # if dist.get_rank() == 0:
+            #     wandb.log({
+            #         "epoch": e,
+            #         "total_loss": total_loss.item()/len(self.train_loader),
+            #         "recon_loss": recon_loss.item()/len(self.train_loader),
+            #         "perm_loss": perm_loss.item()/len(self.train_loader),
+            #         "kld_loss": kld_loss.item()/len(self.train_loader),
+            #         "perplexity": ppl.item()/len(self.train_loader)
+            #     })
         
 if __name__ == "__main__":
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -147,5 +164,5 @@ if __name__ == "__main__":
     runner = VAERunner(config)
     runner.train()
     
-    if dist.get_rank() == 0:
-        wandb.finish()
+    # if dist.get_rank() == 0:
+    #     wandb.finish()

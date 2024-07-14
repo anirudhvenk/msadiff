@@ -61,11 +61,11 @@ class MSADataset(Dataset):
         self.seqs = []
         self.msas = []
         
-        for filename in tqdm(os.listdir(config.data.train_dataset_path)):
+        for filename in tqdm(os.listdir(config.data.train_dataset_path)[:10]):
             msa = read_msa(os.path.join(config.data.train_dataset_path, filename))
-            if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth):
-                msa_filtered = greedy_select(msa, config.data.msa_depth+1)
-                self.msas.append(msa_filtered[1:])
+            if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth + 1):
+                # msa_filtered = greedy_select(msa, config.data.msa_depth+1)
+                self.msas.append(msa[1:])
                 self.seqs.append(msa[0])
         
     def __len__(self):

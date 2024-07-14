@@ -42,7 +42,7 @@ class ReconstructionLoss(nn.Module):
         mask_expanded = mask_expanded.expand(-1, msa_depth, -1)
         
         msa_true = msa_true[~mask_expanded]
-        msa_pred = msa_pred[~mask_expanded.unsqueeze(-1).expand(-1, -1, -1, 33)].view(-1, 33)
+        msa_pred = msa_pred[~mask_expanded]
 
         loss = nn.CrossEntropyLoss(reduction="none")(msa_pred, msa_true)
         perplexity = loss.float().exp().mean()
