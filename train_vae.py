@@ -45,10 +45,20 @@ class VAERunner():
         self.seq_batch_converter = self.seq_alphabet.get_batch_converter()
         
         self.model = MSAVAE(config).to(config.device)
-        self.model = DDP(self.model, broadcast_buffers=False, find_unused_parameters=True)
+        self.model = DDP(self.model, broadcast_buffers=False)
+        
+        encoder = MSAEncoder(config)
+        decoder = MSADecoder(config)
+        
+        if dist.get_rank() == 0:
+            print("Encoder params: ", sum(p.numel() for p in encoder.parameters() if p.requires_grad))
+            print("Decoder params: ", sum(p.numel() for p in decoder.parameters() if p.requires_grad))
+            
+        del encoder
+        del decoder
         
         self.loss = Criterion(config)
-        self.optimizer = torch.optim.Adam(self.model.parameters())
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-6)
         self.grad_scaler = GradScaler()
         
         self.train_dataset = MSADataset(config)
@@ -68,7 +78,6 @@ class VAERunner():
         
     def collate_fn(self, data):
         seqs, msas = zip(*data)
-        # print(len(seqs[0][1]))
         filtered_msas = []
         for msa in msas:
             filtered_msas.append(greedy_select(msa, config.data.msa_depth))
@@ -78,21 +87,45 @@ class VAERunner():
         seq_batch_lens = (seq_tokens != self.seq_alphabet.padding_idx).sum(1)
         
         with torch.no_grad():
-            raw_seq_embeddings = self.seq_encoder(seq_tokens.to(self.config.device), repr_layers=[6])["representations"][6]
-        
-        seq_embeddings = []
+            raw_seq_embeddings = self.seq_encoder(seq_tokens.to(self.config.device), repr_layers=[6], return_contacts=True)
+            raw_pairwise_embeddings = raw_seq_embeddings["attentions"]
+            raw_seq_embeddings = raw_seq_embeddings["representations"][6]
+            
+        # Symmetrize
+        batch_size, layers, heads, seqlen, _ = raw_pairwise_embeddings.size()
+        raw_pairwise_embeddings = raw_pairwise_embeddings.view(batch_size, layers * heads, seqlen, seqlen)
+        raw_pairwise_embeddings = raw_pairwise_embeddings + raw_pairwise_embeddings.transpose(-1, -2)
+                
+        pairwise_seq_embeddings = []
+        single_seq_embeddings = []
         mask = torch.ones(seq_tokens.size(0), self.config.data.max_sequence_len, dtype=torch.bool).to(self.config.device)
         for i, tokens_len in enumerate(seq_batch_lens):
-            seq_repr = raw_seq_embeddings[i, 1 : tokens_len - 1]
-            mask[i, : seq_repr.size(0)] = False
-            seq_repr = F.pad(
-                seq_repr, 
-                (0, 0, 0, self.config.data.max_sequence_len - seq_repr.size(0)), 
+            pairwise_seq_repr = raw_pairwise_embeddings[i, :, 1 : tokens_len - 1, 1 : tokens_len - 1]
+            pairwise_seq_repr = pairwise_seq_repr.permute(1,2,0)
+            single_seq_repr = raw_seq_embeddings[i, 1 : tokens_len - 1]
+            
+            mask[i, : single_seq_repr.size(0)] = False
+            pairwise_seq_repr = F.pad(
+                pairwise_seq_repr, 
+                (0, 0,
+                 0, self.config.data.max_sequence_len - pairwise_seq_repr.size(0), 
+                 0, self.config.data.max_sequence_len - pairwise_seq_repr.size(0)), 
                 "constant", 
                 self.seq_alphabet.padding_idx
             )
-            seq_embeddings.append(seq_repr)
-        seq_embeddings = torch.stack(seq_embeddings)
+            
+            single_seq_repr = F.pad(
+                single_seq_repr, 
+                (0, 0, 0, self.config.data.max_sequence_len - single_seq_repr.size(0)), 
+                "constant", 
+                self.seq_alphabet.padding_idx
+            )
+            
+            pairwise_seq_embeddings.append(pairwise_seq_repr)
+            single_seq_embeddings.append(single_seq_repr)
+        
+        pairwise_seq_embeddings = torch.stack(pairwise_seq_embeddings)
+        single_seq_embeddings = torch.stack(single_seq_embeddings)
         
         msa_tokens = msa_tokens[:,:,1:].to(self.config.device)
         msa_tokens = F.pad(
@@ -102,7 +135,7 @@ class VAERunner():
             self.msa_alphabet.padding_idx
         )
         
-        return seq_embeddings, msa_tokens, mask
+        return single_seq_embeddings, pairwise_seq_embeddings, msa_tokens, ~mask
     
     def train(self):
         for e in range(self.config.training.epochs):
@@ -112,31 +145,29 @@ class VAERunner():
             kld_loss = 0
             ppl = 0
             
-            for seq_embeddings, msa_tokens, mask in tqdm(self.train_loader):
+            for single_seq_embeddings, pairwise_seq_embeddings, msa_tokens, mask in tqdm(self.train_loader):                
                 self.optimizer.zero_grad()
-                
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    pred_msa, perm, mu, logvar = self.model(seq_embeddings, msa_tokens, mask)
-                    loss_dict = self.loss(msa_tokens, pred_msa, mask, perm, mu, logvar)
-                
-                self.grad_scaler.scale(loss_dict["loss"]).backward()
 
+                pred_msa, perm, mu, logvar = self.model(single_seq_embeddings, pairwise_seq_embeddings, msa_tokens.unsqueeze(-1).float(), mask)
+                loss_dict = self.loss(msa_tokens, pred_msa, mask, perm, mu, logvar)
+                loss_dict["loss"].backward()
+                
                 nn.utils.clip_grad_norm_(
                     self.model.parameters(),
-                    max_norm=self.config.optim.grad_clip_norm
+                    max_norm=1.0
                 )
-                self.grad_scaler.step(self.optimizer)
-                self.grad_scaler.update()
-                
+                nn.utils.clip_grad_value_(
+                    self.model.parameters(),
+                    0.5
+                )
+                self.optimizer.step()
+
                 total_loss += loss_dict["loss"].detach()
                 recon_loss += loss_dict["recon_loss"].detach()
                 perm_loss += loss_dict["perm_loss"].detach()
                 kld_loss += loss_dict["kld_loss"].detach()
                 ppl += loss_dict["ppl"].detach()
                 
-                # for name, param in self.model.named_parameters():
-                #     if param.grad is None:
-                #         print(name)
             if dist.get_rank() == 0:
                 print({
                             "epoch": e,

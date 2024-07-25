@@ -3,19 +3,20 @@ import torch.nn as nn
 
 from encoder_modules import OuterProductMean, PairWeightedAveraging, Transition, PositionalEncoding
 from decoder_modules import AxialTransformerLayer, LearnedPositionalEmbedding, RobertaLMHead
+from msa_module import MSAModule
 
 class MSAVAE(nn.Module):
     def __init__(self, config):
         super().__init__()
         
         self.encoder = MSAEncoder(config)
-        self.decoder = MSADecoder(config, self.encoder.embed_tokens.weight)
+        self.decoder = MSADecoder(config)
         self.permuter = Permuter(config)
         
-    def forward(self, seq, msa, mask=None):
-        z, mu, logvar, msa = self.encoder(seq, msa, mask)
+    def forward(self, single_repr, pairwise_repr, msa, mask=None):
+        z, mu, logvar, msa = self.encoder(single_repr, pairwise_repr, msa, mask)
         perm = self.permuter(msa.flatten(-2))
-        msa = self.decoder(z=z, perm=perm, mask=mask)
+        msa = self.decoder(z, perm, mask)
         
         return msa, perm, mu, logvar
 
@@ -23,70 +24,49 @@ class MSAEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         
-        self.embed_tokens = nn.Embedding(
-            config.data.alphabet_size, config.model.encoder_msa_dim, config.data.padding_idx
+        self.msa_module = MSAModule(
+            dim_single=config.model.single_dim,
+            dim_pairwise=config.model.seq_pairwise_dim,
+            depth=config.model.encoder_depth,
+            dim_msa=config.model.encoder_msa_dim,
+            dim_msa_input=1,
+            max_num_msa=config.data.msa_depth,
+            outer_product_mean_dim_hidden=config.model.encoder_outer_prod_mean_hidden,
+            msa_pwa_heads=config.model.encoder_pair_weighted_avg_heads,
+            msa_pwa_dim_head=config.model.encoder_pair_weighted_avg_hidden,
         )
-        
-        self.layers = nn.ModuleList([])
-        for _ in range(config.model.encoder_depth):
-            outer_product_mean = OuterProductMean(
-                dim_msa=config.model.encoder_msa_dim,
-                dim_seq=config.model.seq_dim,
-                dim_hidden=config.model.encoder_outer_prod_mean_hidden
-            )
             
-            pair_weighted_averaging = PairWeightedAveraging(
-                dim_msa=config.model.encoder_msa_dim,
-                dim_seq=config.model.seq_dim,
-                dim_head=config.model.encoder_pair_weighted_avg_hidden,
-                heads=config.model.encoder_pair_weighted_avg_heads,
-                dropout=config.model.encoder_dropout,
-                dropout_type="row"
-            )
-            
-            msa_transition = Transition(dim=config.model.encoder_msa_dim)
-            seq_transition = Transition(dim=config.model.seq_dim)
-            
-            self.layers.append(nn.ModuleList([
-                outer_product_mean,
-                pair_weighted_averaging,
-                msa_transition,
-                seq_transition
-            ]))
-            
-        self.encode_z = nn.Linear(config.model.seq_dim, 2 * config.model.seq_dim)
+        self.encode_z = nn.Linear(config.model.seq_pairwise_dim, 2 * config.model.seq_pairwise_dim)
+        self.layer_norm = nn.LayerNorm(config.model.seq_pairwise_dim)
     
     def forward(
         self,
-        seq,
+        single_repr,
+        pairwise_repr,
         msa,
         mask=None
     ):
-        # TODO sampling (maybe?)
-        msa = self.embed_tokens(msa)
-        
-        for (
-            outer_product_mean,
-            pair_weighted_averaging,
-            msa_transition,
-            seq_transition
-        ) in self.layers:
-            seq = outer_product_mean(msa, mask) + seq
-            msa = pair_weighted_averaging(msa, seq, mask) + msa
-            msa = msa_transition(msa) + msa
-            seq = seq_transition(seq) + seq
+        msa, seq = self.msa_module(
+            single_repr=single_repr, 
+            pairwise_repr=pairwise_repr, 
+            msa=msa, 
+            mask=mask,
+        )
             
-        z = self.encode_z(torch.relu(seq))
-        mu = z[:,:,:seq.size(-1)]
-        logvar = z[:,:,seq.size(-1):]
+        # Mean pooling
+        seq = self.layer_norm(torch.mean(seq, dim=2))
+            
+        z = self.encode_z(seq)
+        mu = z[:,:,:120]
+        logvar = z[:,:,120:]
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         z = mu + eps * std
-        
+                
         return z, mu, logvar, msa
 
 class MSADecoder(nn.Module):
-    def __init__(self, config, embed_tokens_weight):
+    def __init__(self, config):
         super().__init__()
         
         self.max_sequence_len = config.data.max_sequence_len
@@ -117,10 +97,12 @@ class MSADecoder(nn.Module):
             ]
         )
         self.after_norm = nn.LayerNorm(config.model.decoder_msa_dim)
-        self.to_logits = nn.Linear(config.model.decoder_msa_dim, config.data.alphabet_size)
+        self.roberta_lm_head = RobertaLMHead(config)
         
     def init_message_matrix(self, z, perm):
         batch_size = z.size(0)
+
+        x = z.unsqueeze(1).expand(-1, self.msa_depth, -1, -1)
 
         pos_emb = self.positional_embedding(batch_size, self.msa_depth)
         pos_emb = torch.matmul(perm, pos_emb).unsqueeze(2).repeat_interleave(self.max_sequence_len, 2)
@@ -137,7 +119,7 @@ class MSADecoder(nn.Module):
         
         x = self.before_norm(x)
         x = x.permute(1, 2, 0, 3)
-                
+        
         for layer in self.layers:
             x = layer(
                 x,
@@ -146,8 +128,8 @@ class MSADecoder(nn.Module):
         
         x = self.after_norm(x)
         x = x.permute(2, 0, 1, 3)
-        x = self.to_logits(nn.GELU()(x))
-        
+        x = self.roberta_lm_head(x)
+                
         return x
 
 class Permuter(nn.Module):

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class Criterion(nn.Module):
     def __init__(self, config):
@@ -38,15 +39,46 @@ class ReconstructionLoss(nn.Module):
         super().__init__()
         
     def forward(self, msa_true, msa_pred, mask, msa_depth):
+        # print(mask)
         mask_expanded = mask.unsqueeze(1)
         mask_expanded = mask_expanded.expand(-1, msa_depth, -1)
         
-        msa_true = msa_true[~mask_expanded]
-        msa_pred = msa_pred[~mask_expanded]
+        # print(mask_expanded.shape)
+        # print(mask_expanded)
+        
+        msa_true = msa_true[mask_expanded]
+        msa_pred = msa_pred[mask_expanded]
+        # print(msa_true)
+        # print(msa_pred.shape)
+        
+        ce_loss = nn.CrossEntropyLoss(reduction="none")(msa_pred, msa_true)
+        
+        # Calculate the gap penalty
+        # msa_pred_probs = F.softmax(msa_pred, dim=-1)
+        # print(msa_pred_probs.shape)
+        # gap_prob = msa_pred_probs[:, 30].mean()
+        # print("gap_prob", gap_prob.item())
+        
+        # probs = F.softmax(msa_pred, dim=-1)
+        # log_probs = F.log_softmax(msa_pred, dim=-1)
+        # entropy = -torch.sum(probs * log_probs, dim=-1)
+        # print("Entropy", entropy.mean().item())
+        
+        # probs = F.softmax(msa_pred, dim=-1)
+        # top_probs, _ = torch.topk(probs, k=2, dim=-1)
+        # ratio = top_probs[:, 0] / top_probs[:, 1]
+        # print("Top 2 ratio", ratio.mean().item())
+        
+        # print("gap_prob", msa_pred[:,:,30].mean())
+        # gap_prob = msa_pred[:, 30].mean()
+        # gap_penalty = self.gap_penalty_weight * gap_prob
 
-        loss = nn.CrossEntropyLoss(reduction="none")(msa_pred, msa_true)
-        perplexity = loss.float().exp().mean()
-        loss = loss.mean()
+        # Combine the losses
+        # total_loss = ce_loss.mean() + gap_penalty
+
+        # loss = nn.CrossEntropyLoss(reduction="none")(msa_pred, msa_true)
+        perplexity = ce_loss.float().exp().mean()
+        loss = ce_loss.mean()
         
         return loss, perplexity
 
@@ -74,6 +106,6 @@ class KLDLoss(nn.Module):
         super().__init__()
 
     def forward(self, mu, logvar):
-        loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), axis=1)
+        loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp(), axis=1)
         loss = torch.mean(loss)
         return loss

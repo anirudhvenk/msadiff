@@ -410,19 +410,23 @@ class LearnedPositionalEmbedding(nn.Embedding):
         )
         
 class RobertaLMHead(nn.Module):
-    """Head for masked language modeling."""
+    """Roberta Head for masked language modeling."""
 
-    def __init__(self, embed_dim, output_dim, weight):
+    def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(embed_dim, embed_dim)
-        self.layer_norm = nn.LayerNorm(embed_dim)
-        self.weight = weight
-        self.bias = nn.Parameter(torch.zeros(output_dim))
+        self.dense = nn.Linear(config.model.decoder_msa_dim, config.model.decoder_msa_dim)
+        self.layer_norm = nn.LayerNorm(config.model.decoder_msa_dim)
 
-    def forward(self, features):
-        x = self.dense(features)
-        x = gelu(x)
+        self.decoder = nn.Linear(config.model.decoder_msa_dim, config.data.alphabet_size)
+        self.bias = nn.Parameter(torch.zeros(config.data.alphabet_size))
+        self.decoder.bias = self.bias
+
+    def forward(self, x):
+        x = self.dense(x)
+        x = nn.GELU()(x)
         x = self.layer_norm(x)
+
         # project back to size of vocabulary with bias
-        x = F.linear(x, self.weight) + self.bias
+        x = self.decoder(x)
+
         return x

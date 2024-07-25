@@ -4,36 +4,37 @@ def create_config():
     config = ml_collections.ConfigDict()
     
     optim = config.optim = ml_collections.ConfigDict()
-    optim.grad_clip_norm = 1.0
+    optim.grad_clip_norm = 0.3
 
     training = config.training = ml_collections.ConfigDict()
-    training.epochs = 20
+    training.epochs = 200
     
     loss = config.loss = ml_collections.ConfigDict()
-    loss.kld_loss_scale = 0.001
+    loss.kld_loss_scale = 0.5
     loss.perm_loss_scale = 0.5
 
     validation = config.validation = ml_collections.ConfigDict()
 
     model = config.model = ml_collections.ConfigDict()
-    model.seq_dim = 320
+    model.seq_single_dim = 320
+    model.seq_pairwise_dim = 120
     
-    model.encoder_depth = 4
-    model.encoder_msa_dim = 512
-    model.encoder_outer_prod_mean_hidden = 128
+    model.encoder_depth = 2
+    model.encoder_msa_dim = 256
+    model.encoder_outer_prod_mean_hidden = 96
     model.encoder_pair_weighted_avg_hidden = 128
     model.encoder_pair_weighted_avg_heads = 8
     model.encoder_dropout = 0.1
     
-    model.decoder_depth = 6
-    model.decoder_pos_emb_dim = 64
-    model.decoder_msa_dim = 512
-    model.decoder_max_pos = 1024
-    model.decoder_ffn_hidden = 2048
-    model.decoder_num_heads = 8
-    model.decoder_dropout = 0.1
-    model.decoder_attn_dropout = 0.1
-    model.decoder_activation_dropout = 0.1
+    model.decoder_depth = 4
+    model.decoder_pos_emb_dim = 128
+    model.decoder_msa_dim = 256
+    model.decoder_max_pos = 512
+    model.decoder_ffn_hidden = 1024
+    model.decoder_num_heads = 4
+    model.decoder_dropout = 0.0
+    model.decoder_attn_dropout = 0.0
+    model.decoder_activation_dropout = 0.0
     
     data = config.data = ml_collections.ConfigDict()
     data.alphabet_size = 33
