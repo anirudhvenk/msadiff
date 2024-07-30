@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from encoder_modules import OuterProductMean, PairWeightedAveraging, Transition, PositionalEncoding
 from decoder_modules import AxialTransformerLayer, LearnedPositionalEmbedding, RobertaLMHead
+from encoder_utils import PositionalEncoding
 from msa_module import MSAModule
 
 class MSAVAE(nn.Module):
@@ -15,7 +15,8 @@ class MSAVAE(nn.Module):
         
     def forward(self, single_repr, pairwise_repr, msa, mask=None):
         z, mu, logvar, msa = self.encoder(single_repr, pairwise_repr, msa, mask)
-        perm = self.permuter(msa.flatten(-2))
+        # z = torch.randn_like(z, device=z.device)
+        perm = self.permuter(torch.mean(msa, dim=-1))
         msa = self.decoder(z, perm, mask)
         
         return msa, perm, mu, logvar
@@ -25,7 +26,7 @@ class MSAEncoder(nn.Module):
         super().__init__()
         
         self.msa_module = MSAModule(
-            dim_single=config.model.single_dim,
+            dim_single=config.model.seq_single_dim,
             dim_pairwise=config.model.seq_pairwise_dim,
             depth=config.model.encoder_depth,
             dim_msa=config.model.encoder_msa_dim,
@@ -55,7 +56,7 @@ class MSAEncoder(nn.Module):
             
         # Mean pooling
         seq = self.layer_norm(torch.mean(seq, dim=2))
-            
+        
         z = self.encode_z(seq)
         mu = z[:,:,:120]
         logvar = z[:,:,120:]
@@ -75,7 +76,7 @@ class MSADecoder(nn.Module):
         
         self.positional_embedding = PositionalEncoding(config.model.decoder_pos_emb_dim)
         self.decode_z = nn.Linear(
-            config.model.seq_dim+config.model.decoder_pos_emb_dim, 
+            config.model.seq_pairwise_dim+config.model.decoder_pos_emb_dim, 
             config.model.decoder_msa_dim
         )
         
@@ -135,7 +136,7 @@ class MSADecoder(nn.Module):
 class Permuter(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.scoring_fc = nn.Linear(config.data.max_sequence_len*config.model.encoder_msa_dim, 1)
+        self.scoring_fc = nn.Linear(config.data.max_sequence_len, 1)
 
     def score(self, x, mask=None):
         scores = self.scoring_fc(x)

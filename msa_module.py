@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from einops import einsum, rearrange, reduce, repeat, pack, unpack
 from einops.layers.torch import Rearrange
 from functools import partial
-from utils import Attention
+from encoder_utils import Attention
 
 LinearNoBias = partial(nn.Linear, bias = False)
 
