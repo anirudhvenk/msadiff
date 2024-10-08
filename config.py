@@ -38,12 +38,13 @@ def create_config():
     
     data = config.data = ml_collections.ConfigDict()
     data.alphabet_size = 33
-    data.padding_idx = 1
+    data.msa_padding_idx = 1
+    data.seq_padding_idx = 1
     data.msa_depth = 32
     data.batch_size = 1
     data.grad_accum_steps = 8
     data.max_sequence_len = 256
-    data.train_dataset_path = "./databases/openfold/scratch/alignments_1"
+    data.train_dataset_path = "./databases/openfold/new_sratch/scratch"
     data.test_dataset_path = "./databases/data/a3m"
     data.save_path = "./weights"
 

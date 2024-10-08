@@ -155,7 +155,6 @@ class VAERunner():
             self.msa_alphabet.padding_idx
         )
         
-        # return torch.randn_like(single_seq_embeddings), torch.randn_like(pairwise_seq_embeddings), msa_tokens, mask
         return single_seq_embeddings, pairwise_seq_embeddings , msa_tokens, mask
     
     def save_checkpoint(self, epoch):

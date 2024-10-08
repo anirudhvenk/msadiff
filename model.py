@@ -1,11 +1,15 @@
 import torch
 import torch.nn as nn
+import pytorch_lightning as pl
 
 from decoder_modules import AxialTransformerLayer, LearnedPositionalEmbedding, RobertaLMHead
 from encoder_utils import PositionalEncoding
+from pytorch_lightning.callbacks import ModelCheckpoint
 from msa_module import MSAModule
+from loss import Criterion
+from torch.profiler import profile, ProfilerActivity
 
-class MSAVAE(nn.Module):
+class MSAVAE(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         
@@ -13,9 +17,66 @@ class MSAVAE(nn.Module):
         self.decoder = MSADecoder(config)
         self.permuter = Permuter(config)
         
+        self.loss = Criterion(config)
+        
+    def training_step(self, batch, batch_idx):
+        single_repr, pairwise_repr, msa_tokens, mask = batch
+        z, mu, logvar, msa = self.encoder(
+            single_repr,
+            pairwise_repr,
+            msa_tokens.unsqueeze(-1),
+            mask.to(torch.bool)
+        )
+        perm = self.permuter(torch.mean(msa, dim=-1))
+        pred_msa = self.decoder(z, perm, mask.to(torch.bool))
+
+        loss_dict = self.loss(msa_tokens.to(torch.long), pred_msa, mask.to(torch.bool), perm, mu, logvar)
+
+        for loss_name, loss_value in loss_dict.items():
+            self.log(
+                f"train_{loss_name}",
+                loss_value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True
+            )
+
+        return loss_dict
+
+    def validation_step(self, batch, batch_idx):
+        single_repr, pairwise_repr, msa_tokens, mask = batch
+        z, mu, logvar, msa = self.encoder(
+            single_repr,
+            pairwise_repr,
+            msa_tokens.unsqueeze(-1),
+            mask.to(torch.bool)
+        )
+        perm = self.permuter(torch.mean(msa, dim=-1))
+        pred_msa = self.decoder(z, perm, mask.to(torch.bool))
+
+        loss_dict = self.loss(msa_tokens.to(torch.long), pred_msa, mask.to(torch.bool), perm, mu, logvar)
+
+        for loss_name, loss_value in loss_dict.items():
+            self.log(
+                f"val_{loss_name}",
+                loss_value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True
+            )
+
+        return loss_dict
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        return optimizer
+        
     def forward(self, single_repr, pairwise_repr, msa, mask=None):
         z, mu, logvar, msa = self.encoder(single_repr, pairwise_repr, msa, mask)
-        # z = torch.randn_like(z, device=z.device)
         perm = self.permuter(torch.mean(msa, dim=-1))
         msa = self.decoder(z, perm, mask)
         
@@ -55,6 +116,7 @@ class MSAEncoder(nn.Module):
         )
             
         # Mean pooling
+        
         seq = self.layer_norm(torch.mean(seq, dim=2))
         
         z = self.encode_z(seq)

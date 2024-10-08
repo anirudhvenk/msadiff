@@ -6,3 +6,5 @@ databases
 wandb
 nohup.out
 weights
+lightning_logs
+checkpoints

@@ -57,49 +57,16 @@ def greedy_select(msa: List[Tuple[str, str]], num_seqs: int, mode: str = "max") 
     indices = sorted(indices)
     return [msa[idx] for idx in indices]
 
-class MSADataset(Dataset):
-    def __init__(self, config, test=False):
-        self.seqs = []
-        self.msas = []
-        
-        if not test:
-            for filename in tqdm(os.listdir(config.data.train_dataset_path)):
-                f = os.path.join(os.path.join(config.data.train_dataset_path, filename), "uniclust30.a3m")
-                msa = read_msa(f)
-                if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth + 1):
-                    self.msas.append(msa[1:])
-                    self.seqs.append(msa[0])
-        else:
-            for filename in tqdm(os.listdir(config.data.test_dataset_path)):
-                msa = read_msa(os.path.join(config.data.test_dataset_path, filename))
-                if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth + 1):
-                    self.msas.append(msa[1:])
-                    self.seqs.append(msa[0])
-        
-    def __len__(self):
-        return len(self.msas)
+def pad_msa_sequence(config, seq, msa, esm_modules):
+    seq_encoder, seq_alphabet, seq_batch_converter, msa_alphabet, msa_batch_converter = esm_modules
+    filtered_msa = greedy_select(msa, config.data.msa_depth)
     
-    def __getitem__(self, idx):
-        return self.seqs[idx], self.msas[idx]
-    
-_, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
-msa_batch_converter = msa_alphabet.get_batch_converter()
-
-seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
-seq_encoder.to("cuda:0")
-seq_batch_converter = seq_alphabet.get_batch_converter()
-    
-def pad_msa_sequence(config, seqs, msas):
-    filtered_msas = []
-    for msa in msas:
-        filtered_msas.append(greedy_select(msa, config.data.msa_depth))
-    
-    _, _, msa_tokens = msa_batch_converter(filtered_msas)
-    _, _, seq_tokens = seq_batch_converter(seqs)
+    _, _, msa_tokens = msa_batch_converter([filtered_msa])
+    _, _, seq_tokens = seq_batch_converter([seq])
     seq_batch_lens = (seq_tokens != seq_alphabet.padding_idx).sum(1)
     
     with torch.no_grad():
-        raw_seq_embeddings = seq_encoder(seq_tokens.to("cuda:0"), repr_layers=[6], return_contacts=True)
+        raw_seq_embeddings = seq_encoder(seq_tokens.to(config.device), repr_layers=[6], return_contacts=True)
         raw_pairwise_embeddings = raw_seq_embeddings["attentions"]
         raw_seq_embeddings = raw_seq_embeddings["representations"][6]
         
@@ -110,7 +77,7 @@ def pad_msa_sequence(config, seqs, msas):
             
     pairwise_seq_embeddings = []
     single_seq_embeddings = []
-    mask = torch.zeros(seq_tokens.size(0), config.data.max_sequence_len, dtype=torch.bool).to("cuda:0")
+    mask = torch.zeros(seq_tokens.size(0), config.data.max_sequence_len, dtype=torch.bool).to(config.device)
     for i, tokens_len in enumerate(seq_batch_lens):
         pairwise_seq_repr = raw_pairwise_embeddings[i, :, 1 : tokens_len - 1, 1 : tokens_len - 1]
         pairwise_seq_repr = pairwise_seq_repr.permute(1,2,0)
@@ -139,7 +106,7 @@ def pad_msa_sequence(config, seqs, msas):
     pairwise_seq_embeddings = torch.stack(pairwise_seq_embeddings)
     single_seq_embeddings = torch.stack(single_seq_embeddings)
     
-    msa_tokens = msa_tokens[:,:,1:].to("cuda:0")
+    msa_tokens = msa_tokens[:,:,1:].to(config.device)
     msa_tokens = F.pad(
         msa_tokens,
         (0, config.data.max_sequence_len - msa_tokens.size(-1)),
@@ -147,5 +114,56 @@ def pad_msa_sequence(config, seqs, msas):
         msa_alphabet.padding_idx
     )
     
-    # return torch.randn_like(single_seq_embeddings), torch.randn_like(pairwise_seq_embeddings), msa_tokens, mask
     return single_seq_embeddings, pairwise_seq_embeddings , msa_tokens, mask
+
+class MSADataset(Dataset):
+    def __init__(self, config, test=False):
+        _, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+        msa_batch_converter = msa_alphabet.get_batch_converter()
+
+        seq_encoder, seq_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+        seq_encoder.to(config.device)
+        seq_batch_converter = seq_alphabet.get_batch_converter()        
+        
+        self.single_seq_reprs = []
+        self.pairwise_seq_reprs = []
+        self.msa_tokens = []
+        self.masks = []
+        
+        if test:
+            for filename in tqdm(os.listdir(config.data.test_dataset_path)):
+                msa = read_msa(os.path.join(config.data.test_dataset_path, filename))
+                if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth + 1):
+                    single_seq_embeddings, pairwise_seq_embeddings, msa_tokens, mask = pad_msa_sequence(
+                        config, 
+                        msa[0], 
+                        msa[1:],
+                        (seq_encoder, seq_alphabet, seq_batch_converter, msa_alphabet, msa_batch_converter)
+                    )
+                    self.single_seq_reprs.append(single_seq_embeddings.squeeze(0).cpu().to(torch.bfloat16))
+                    self.pairwise_seq_reprs.append(pairwise_seq_embeddings.squeeze(0).cpu().to(torch.bfloat16))
+                    self.msa_tokens.append(msa_tokens.squeeze(0).cpu().to(torch.bfloat16))
+                    self.masks.append(mask.squeeze(0).cpu().to(torch.bfloat16))
+        else:
+            for dirname in os.listdir(config.data.train_dataset_path)[:1]:
+                alignment_cluster = os.path.join(config.data.train_dataset_path, dirname)
+                for filename in tqdm(os.listdir(alignment_cluster)[:80000]):
+                    f = os.path.join(os.path.join(alignment_cluster, filename), "uniclust30.a3m")
+                    msa = read_msa(f)
+                    if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth + 2):
+                        single_seq_embeddings, pairwise_seq_embeddings, msa_tokens, mask = pad_msa_sequence(
+                            config, 
+                            msa[0], 
+                            msa[2:],
+                            (seq_encoder, seq_alphabet, seq_batch_converter, msa_alphabet, msa_batch_converter)
+                        )
+                        self.single_seq_reprs.append(single_seq_embeddings.squeeze(0).cpu().to(torch.bfloat16))
+                        self.pairwise_seq_reprs.append(pairwise_seq_embeddings.squeeze(0).cpu().to(torch.bfloat16))
+                        self.msa_tokens.append(msa_tokens.squeeze(0).cpu().to(torch.bfloat16))
+                        self.masks.append(mask.squeeze(0).cpu().to(torch.bfloat16))
+                
+    def __len__(self):
+        return len(self.msa_tokens)
+    
+    def __getitem__(self, idx):
+        return self.single_seq_reprs[idx], self.pairwise_seq_reprs[idx], self.msa_tokens[idx], self.masks[idx]

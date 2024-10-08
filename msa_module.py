@@ -269,7 +269,7 @@ class MSAModule(nn.Module):
 
         self.layers = layers
 
-        self.layerscale_output = nn.Parameter(torch.zeros(dim_pairwise)).to("cuda:0") if layerscale_output else 1.
+        self.layerscale_output = 1.
 
     def forward(
         self,
@@ -280,10 +280,9 @@ class MSAModule(nn.Module):
         mask = None,
         msa_mask = None,
     ):
-
         batch, num_msa, device = *msa.shape[:2], msa.device
-
         msa = self.msa_init_proj(msa)
+        
 
         single_msa_feats = self.single_to_msa_feats(single_repr)
 
