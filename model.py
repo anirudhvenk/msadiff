@@ -36,7 +36,7 @@ class MSAVAE(pl.LightningModule):
             self.log(
                 f"train_{loss_name}",
                 loss_value,
-                on_step=False,
+                on_step=True,
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
@@ -72,11 +72,12 @@ class MSAVAE(pl.LightningModule):
         return loss_dict
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        return optimizer
+        return None
+    #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+    #     return optimizer
         
     def forward(self, single_repr, pairwise_repr, msa, mask=None):
-        z, mu, logvar, msa = self.encoder(single_repr, pairwise_repr, msa, mask)
+        z, mu, logvar, msa = self.encoder(single_repr, pairwise_repr, msa.unsqueeze(-1), mask.to(torch.bool))
         perm = self.permuter(torch.mean(msa, dim=-1))
         msa = self.decoder(z, perm, mask)
         
@@ -142,7 +143,7 @@ class MSADecoder(nn.Module):
             config.model.decoder_msa_dim
         )
         
-        self.register_buffer("position_ids", torch.arange(self.max_sequence_len).expand((1,self.msa_depth,-1)))
+        self.register_buffer("position_ids", torch.arange(self.max_sequence_len).expand((1,self.msa_depth,-1)).clone())
         self.position_embeddings = torch.nn.Embedding(self.max_sequence_len, config.model.decoder_msa_dim)
         
         self.before_norm = nn.LayerNorm(config.model.decoder_msa_dim)

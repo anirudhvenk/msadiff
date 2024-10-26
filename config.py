@@ -4,7 +4,8 @@ def create_config():
     config = ml_collections.ConfigDict()
     
     optim = config.optim = ml_collections.ConfigDict()
-    optim.grad_clip_norm = 0.3
+    optim.grad_clip_norm = 1.0
+    optim.learning_rate = 1e-5
 
     training = config.training = ml_collections.ConfigDict()
     training.epochs = 200
@@ -32,9 +33,9 @@ def create_config():
     model.decoder_max_pos = 512
     model.decoder_ffn_hidden = 2048
     model.decoder_num_heads = 8
-    model.decoder_dropout = 0.0
-    model.decoder_attn_dropout = 0.0
-    model.decoder_activation_dropout = 0.0
+    model.decoder_dropout = 0.1
+    model.decoder_attn_dropout = 0.1
+    model.decoder_activation_dropout = 0.1
     
     data = config.data = ml_collections.ConfigDict()
     data.alphabet_size = 33

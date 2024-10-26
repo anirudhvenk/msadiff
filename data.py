@@ -147,7 +147,7 @@ class MSADataset(Dataset):
         else:
             for dirname in os.listdir(config.data.train_dataset_path)[:1]:
                 alignment_cluster = os.path.join(config.data.train_dataset_path, dirname)
-                for filename in tqdm(os.listdir(alignment_cluster)[:80000]):
+                for filename in tqdm(os.listdir(alignment_cluster)[:100]):
                     f = os.path.join(os.path.join(alignment_cluster, filename), "uniclust30.a3m")
                     msa = read_msa(f)
                     if (len(msa[0][1]) <= config.data.max_sequence_len and len(msa) >= config.data.msa_depth + 2):
@@ -167,3 +167,34 @@ class MSADataset(Dataset):
     
     def __getitem__(self, idx):
         return self.single_seq_reprs[idx], self.pairwise_seq_reprs[idx], self.msa_tokens[idx], self.masks[idx]
+
+class PreprocessedMSADataset(Dataset):
+    def __init__(self, path):
+        self.single_seq_reprs = []
+        self.pairwise_seq_reprs = []
+        self.msa_tokens = []
+        self.masks = []
+        
+        for dirname in os.listdir(path)[-1:]:
+            alignment_cluster = os.path.join(path, dirname)
+            for filename in tqdm(os.listdir(alignment_cluster)):
+                single_path = os.path.join(os.path.join(alignment_cluster, filename), "single_repr.pt")
+                pairwise_path = os.path.join(os.path.join(alignment_cluster, filename), "pairwise_repr.pt")
+                tokens_path = os.path.join(os.path.join(alignment_cluster, filename), "msa_tokens.pt")
+                mask_path = os.path.join(os.path.join(alignment_cluster, filename), "mask.pt")
+                
+                self.single_seq_reprs.append(single_path)
+                self.pairwise_seq_reprs.append(pairwise_path)
+                self.msa_tokens.append(tokens_path)
+                self.masks.append(mask_path)
+        
+    def __len__(self):
+        return len(self.msa_tokens)
+    
+    def __getitem__(self, idx):
+        return (
+            torch.load(self.single_seq_reprs[idx], weights_only=True), 
+            torch.load(self.pairwise_seq_reprs[idx], weights_only=True), 
+            torch.load(self.msa_tokens[idx], weights_only=True), 
+            torch.load(self.masks[idx], weights_only=True)
+        )
