@@ -1,10 +1,10 @@
+protenix
 .ipynb_checkpoints
-/data
 __pycache__
-/databases
-databases
-wandb
-nohup.out
+data
 weights
 lightning_logs
-checkpoints
+wandb
+protenix
+flow_matching
+databases

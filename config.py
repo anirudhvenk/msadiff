@@ -2,51 +2,30 @@ import ml_collections
 
 def create_config():
     config = ml_collections.ConfigDict()
-    
-    optim = config.optim = ml_collections.ConfigDict()
-    optim.grad_clip_norm = 1.0
-    optim.learning_rate = 1e-5
-
-    training = config.training = ml_collections.ConfigDict()
-    training.epochs = 200
-    
-    loss = config.loss = ml_collections.ConfigDict()
-    loss.kld_loss_scale = 0.001
-    loss.perm_loss_scale = 0.5
-
-    validation = config.validation = ml_collections.ConfigDict()
 
     model = config.model = ml_collections.ConfigDict()
-    model.seq_single_dim = 320
-    model.seq_pairwise_dim = 120
-    
-    model.encoder_depth = 4
-    model.encoder_msa_dim = 512
-    model.encoder_outer_prod_mean_hidden = 192
-    model.encoder_pair_weighted_avg_hidden = 192
-    model.encoder_pair_weighted_avg_heads = 8
-    model.encoder_dropout = 0.1
-    
-    model.decoder_depth = 8
-    model.decoder_pos_emb_dim = 128
-    model.decoder_msa_dim = 512
-    model.decoder_max_pos = 512
-    model.decoder_ffn_hidden = 2048
-    model.decoder_num_heads = 8
-    model.decoder_dropout = 0.1
-    model.decoder_attn_dropout = 0.1
-    model.decoder_activation_dropout = 0.1
+    model.msa_embedding_dim = 128 # constant from AF3
+    model.conditioning_dim = 128
+    model.hidden_dim = 768
+    model.num_heads = 12
+    model.dropout = 0.1
+    model.depth = 12
+
+    training = config.training = ml_collections.ConfigDict()
+    training.ema_decay = 0.9999
+    training.lr = 1e-5
+    training.weight_decay = 1e-2
+    training.beta1 = 0.9
+    training.beta2 = 0.999
+    training.factor = 0.8
+    training.patience = 5
     
     data = config.data = ml_collections.ConfigDict()
-    data.alphabet_size = 33
-    data.msa_padding_idx = 1
-    data.seq_padding_idx = 1
-    data.msa_depth = 32
-    data.batch_size = 1
-    data.grad_accum_steps = 8
-    data.max_sequence_len = 256
-    data.train_dataset_path = "./databases/openfold/new_sratch/scratch"
-    data.test_dataset_path = "./databases/data/a3m"
-    data.save_path = "./weights"
+    data.batch_size = 32
+    data.max_msa_depth = 32
+    data.vocab_size = 27
+    data.train_dataset_path = "data/openfold_filtered_sample_train"
+    data.val_dataset_path = "data/openfold_filtered_val_data"
+    data.test_dataset_path = "data/msa_transformer_data"
 
     return config
