@@ -13,6 +13,7 @@ def create_config():
 
     training = config.training = ml_collections.ConfigDict()
     training.ema_decay = 0.9999
+    training.max_epochs = 500
     training.lr = 1e-5
     training.weight_decay = 1e-2
     training.beta1 = 0.9
@@ -24,8 +25,8 @@ def create_config():
     data.batch_size = 32
     data.max_msa_depth = 32
     data.vocab_size = 27
-    data.train_dataset_path = "data/openfold_filtered_sample_train"
-    data.val_dataset_path = "data/openfold_filtered_val_data"
-    data.test_dataset_path = "data/msa_transformer_data"
+    data.train_dataset_path = "databases/evodiff/train"
+    data.val_dataset_path = "databases/evodiff/val"
+    data.test_dataset_path = "databases/evodiff/test"
 
     return config

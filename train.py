@@ -46,7 +46,7 @@ checkpoint_callback = ModelCheckpoint(
 
 trainer = pl.Trainer(
     accelerator="gpu",
-    max_epochs=50,
+    max_epochs=config.training.max_epochs,
     gradient_clip_val=1.0,
     precision="bf16-mixed",
     logger=wandb_logger,
